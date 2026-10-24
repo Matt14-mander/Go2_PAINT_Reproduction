@@ -1,5 +1,7 @@
 # GO2-PIPER：PAINT low-level locomotion
 
+同步与分阶段服务器训练脚本：[服务器操作说明](PAINT_SERVER_TRAINING_CN.md)。
+
 本阶段使用 LeggedManip Lab / Isaac Lab 实现 PAINT 的可替代底层策略。
 依据：[PAINT Low-Level Locomotion](https://paint-bot.github.io/docs/locomotion.html)。
 原始 ANYmal D perceptive backbone 与训练代码未公开；本实现不是原始权重或逐参数复刻。

@@ -100,3 +100,15 @@ class Go2PiperWBCPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         max_grad_norm=1.0,
     )
 
+
+@configclass
+class Go2PiperPaintLocoPPORunnerCfg(Go2PiperFlatPPORunnerCfg):
+    experiment_name = "go2_piper_paint_loco"
+    save_interval = 200
+    clip_actions = 4.0
+
+
+@configclass
+class Go2PiperPaintLocoRoughPPORunnerCfg(Go2PiperPaintLocoPPORunnerCfg):
+    experiment_name = "go2_piper_paint_loco_rough"
+

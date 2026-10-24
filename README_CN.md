@@ -3,6 +3,8 @@
 </p>
 
 # LeggedManip Lab
+
+GO2-PIPER 的 PAINT 底层 locomotion 改造：[任务、训练与冻结策略接口](docs/PAINT_LOCOMOTION_CN.md)。
  
 [![Isaac Sim](https://img.shields.io/badge/Isaac%20Sim-5.1.0-blue.svg)](https://docs.isaacsim.omniverse.nvidia.com/latest/index.html)
 [![Isaac Lab](https://img.shields.io/badge/Isaac%20Lab-main%20branch-blue.svg)](https://github.com/isaac-sim/IsaacLab/tree/main)

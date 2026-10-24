@@ -32,7 +32,7 @@ def positive_int(value):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("stage", choices=("prepare", "smoke", "flat", "rough", "pipeline"))
+    parser.add_argument("stage", choices=("diagnose", "prepare", "smoke", "flat", "rough", "pipeline"))
     parser.add_argument("--num-envs", type=positive_int, default=4096)
     parser.add_argument("--smoke-envs", type=positive_int, default=16)
     parser.add_argument("--smoke-steps", type=positive_int, default=100)
@@ -50,6 +50,64 @@ def parse_args(argv=None):
     if not re.fullmatch(r"cuda:\d+", args.device):
         parser.error("--device must be cuda:<index>, for example cuda:0")
     return args
+
+
+def diagnose_environment():
+    """Read package metadata/source files without importing or launching Isaac Sim.
+
+    Module-level find_spec only locates packages. Nested symbols are detected in
+    source, since importing isaaclab_rl before AppLauncher may itself fail.
+    """
+    packages = {}
+    for name in ("isaacsim", "isaaclab", "isaaclab-rl", "isaaclab-tasks", "rsl-rl-lib", "torch", "tensordict"):
+        try:
+            packages[name] = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            packages[name] = None
+    modules = {}
+    for name in ("isaaclab", "isaaclab_rl", "isaaclab_tasks", "rsl_rl"):
+        spec = importlib.util.find_spec(name)
+        modules[name] = spec.origin if spec else None
+    features = {}
+    if modules["isaaclab_rl"]:
+        directory = Path(modules["isaaclab_rl"]).parent / "rsl_rl"
+        # Include config compatibility utilities, but never execute these files.
+        sources = "\n".join(path.read_text(encoding="utf-8") for path in directory.glob("*.py"))
+        for symbol in ("RslRlBaseRunnerCfg", "RslRlMLPModelCfg", "RslRlPpoActorCriticCfg",
+                       "handle_deprecated_rsl_rl_cfg"):
+            features[symbol] = bool(re.search(r"(?:class|def)\s+" + symbol + r"\b", sources))
+        wrapper = directory / "vecenv_wrapper.py"
+        if wrapper.is_file():
+            features["wrapper_uses_TensorDict"] = "TensorDict" in wrapper.read_text(encoding="utf-8")
+    if modules["isaaclab"]:
+        directory = Path(modules["isaaclab"]).parent
+        for name, relative_path, symbol in (
+            ("ray_alignment", "sensors/ray_caster/ray_caster_cfg.py", "ray_alignment"),
+            ("attach_yaw_only", "sensors/ray_caster/ray_caster_cfg.py", "attach_yaw_only"),
+        ):
+            path = directory / relative_path
+            features[name] = symbol in path.read_text(encoding="utf-8") if path.is_file() else None
+    return {"python": sys.version, "executable": sys.executable,
+            "packages": packages, "module_paths": modules, "source_features": features}
+
+
+def rsl_runtime_profile(version, features):
+    """Accept matched config/wrapper APIs, rather than an isolated version number."""
+    from packaging.version import Version
+
+    parsed = Version(version)
+    if features.get("RslRlMLPModelCfg"):
+        if parsed >= Version("5.0.1"):
+            return "modern_actor_critic"
+    elif (Version("3.0.1") <= parsed < Version("4.0.0")
+          and features.get("RslRlPpoActorCriticCfg") and features.get("wrapper_uses_TensorDict")):
+        return "legacy_policy_tensordict"
+    raise RuntimeError(
+        f"Unmatched RSL-RL {version} / Isaac Lab adapter APIs: {features}. "
+        "Run `python scripts/paint/server_train.py diagnose` and share the output. "
+        "Supported pairs: RSL-RL 3.x >=3.0.1 + legacy policy/TensorDict adapter, "
+        "or RSL-RL >=5.0.1 + modern actor/critic adapter. Do not upgrade RSL-RL alone."
+    )
 
 
 class Launcher:
@@ -96,12 +154,11 @@ class Launcher:
         for name in ("torch", "isaaclab", "isaaclab_rl", "isaaclab_tasks", "isaacsim"):
             if importlib.util.find_spec(name) is None:
                 raise RuntimeError(f"Missing {name}; activate the existing Isaac Lab environment first.")
-        from packaging.version import Version
         import torch
 
         version = importlib.metadata.version("rsl-rl-lib")
-        if Version(version) < Version("5.0.1"):
-            raise RuntimeError(f"rsl-rl-lib {version} is incompatible; repository requires >=5.0.1")
+        diagnostic = diagnose_environment()
+        profile = rsl_runtime_profile(version, diagnostic["source_features"])
         index = int(self.args.device.split(":")[1])
         if not torch.cuda.is_available() or index >= torch.cuda.device_count():
             raise RuntimeError(f"CUDA device {self.args.device} is unavailable")
@@ -115,6 +172,7 @@ class Launcher:
                     raise RuntimeError(f"Unmaterialized LFS asset: {path}; run git lfs pull locally, then sync again.")
         self.log_dir.mkdir(parents=True, exist_ok=True)
         metadata = {"python": sys.version, "executable": sys.executable, "rsl_rl": version,
+                    "rsl_profile": profile, "diagnostic": diagnostic,
                     "torch": torch.__version__, "cuda": torch.version.cuda,
                     "device": self.args.device, "gpu": torch.cuda.get_device_name(index),
                     "arguments": {key: str(value) if isinstance(value, Path) else value
@@ -128,6 +186,7 @@ class Launcher:
 
     def smoke(self):
         self.run("interface", "scripts/paint/check_interface.py")
+        self.run("rsl_compat", "scripts/paint/check_rsl_compat.py", "--headless", "--device", self.args.device)
         for terrain, task in TASKS.items():
             self.run(f"smoke_{terrain}", "scripts/paint/smoke_locomotion.py", "--task", task,
                      "--num_envs", self.args.smoke_envs, "--steps", self.args.smoke_steps,
@@ -171,6 +230,9 @@ class Launcher:
         return max(checkpoints, key=lambda item: item[0])[1]
 
     def execute(self):
+        if self.args.stage == "diagnose":
+            print(json.dumps(diagnose_environment(), indent=2), flush=True)
+            return
         self.preflight()
         if self.args.stage == "prepare":
             self.prepare()

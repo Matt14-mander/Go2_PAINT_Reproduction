@@ -1,8 +1,37 @@
 # 同步到服务器并启动 PAINT 底层训练
 
-脚本不会自动安装 Isaac Lab、升级环境或租用 GPU。先准备仓库 README 指定的 Isaac Sim 5.1.0 / Isaac Lab / Python 3.11 / RSL-RL >=5.0.1 环境。
+脚本不会自动安装 Isaac Lab、升级环境或租用 GPU。使用 Isaac Sim 5.1.0 / Python 3.11，并选择配套的 Isaac Lab/RSL-RL 接口：旧版 policy + TensorDict 包装器配 RSL-RL 3.x（>=3.0.1），新版 actor/critic 配 >=5.0.1。
 下面的服务器路径是示例，请替换为实际持久化磁盘目录。代码同步本身不会启动训练。
-本地已通过 4 项流程单元测试、pipeline 命令预览、Python 编译与 PowerShell 语法检查；未连接服务器或运行 Isaac 训练。
+本地已通过 8 项流程单元测试、Python 编译与补丁检查。使用官方新旧配置源码分别验证了 16 个 runner 配置，并使用实际 RSL-RL 3.0.1 在合成 TensorDict 环境完成 2 次 CPU PPO 更新（隔离 Git 日志）。这不等同于 Isaac 物理 smoke；未连接服务器或运行 Isaac 训练。
+
+## 环境版本不匹配时先诊断
+
+旧脚本会直接拒绝 `rsl-rl-lib 3.0.1`；新版本已加入项目内兼容层，不需要为此升级现有环境。
+兼容层将网络结构、Gaussian 标准差和观测归一化字段转换为原生 `RslRlPpoActorCriticCfg`，并使用 `policy/critic` 观测组；新版使用 `actor/critic` 观测组。
+7 个机器人配置统一从兼容层导入，避免任务扫描时因其他机器人的配置导入失败。
+训练和评估脚本也不再强制导入旧版不存在的 `handle_deprecated_rsl_rl_cfg`。
+不要只修改版本检查，也不要直接单独升级 RSL-RL，Isaac Lab 包装器必须配套。
+先同步整个最新工作区，然后检查实际接口：
+
+```bash
+python scripts/paint/server_train.py diagnose
+```
+
+该命令只读取 Python/包版本、安装目录及配置类/包装器源码特征，不导入 Isaac Sim，不要求 CUDA 可用，不安装任何依赖。
+未找到 pip 版本时会显示 null；源码安装仍可通过 module_paths 定位。
+服务器的自定义 Isaac Lab fork 尚未在本地执行真实物理验证，最终以该环境的 smoke 为准。
+
+针对服务器 `limx` 环境（Isaac Sim 5.1.0、isaaclab 0.48.0、isaaclab_rl 0.4.4、RSL-RL 3.0.1、Torch 2.7.0+cu128），更新后在服务器逐行执行：
+
+```bash
+cd ~/workspace/Go2_PAINT_Reproduction
+python scripts/paint/server_train.py diagnose
+python scripts/paint/server_train.py prepare
+python scripts/paint/server_train.py smoke
+```
+
+新版 smoke 在物理检查之前，还会启动 AppLauncher 检查 16 个 runner 配置的实例化、必填字段和观测组映射。只同步 `server_train.py` 不够，需同时同步 `source/LeggedManip_Lab`、`scripts/rsl_rl` 与 `scripts/paint`。
+旧接口若仍返回 tuple 而非 TensorDict，预检会停止，不会混用不兼容的 runner。
 
 ## 1. 本地 Windows 同步
 
@@ -48,13 +77,13 @@ export CUDA_VISIBLE_DEVICES=0
 # 检查依赖/CUDA/LFS，并安装项目本身，不升级/补装外部依赖
 python scripts/paint/server_train.py prepare
 
-# 依次执行：CPU 接口测试、Flat smoke、Flat 64 环境 PPO 2 iterations、
+# 依次执行：CPU 接口测试、RL 配置兼容检查、Flat smoke、Flat 64 环境 PPO 2 iterations、
 # Rough smoke、Rough 64 环境 PPO 2 iterations
 python scripts/paint/server_train.py smoke \
   --smoke-envs 16 --smoke-steps 100 --ppo-envs 64 --ppo-iterations 2
 ```
 
-`prepare` 与后续各阶段检查 Python 3.11、关键包、CUDA、RSL-RL 版本以及 GO2-PIPER USD 是否还是 LFS 指针。
+`prepare` 与后续各阶段检查 Python 3.11、关键包、CUDA、RSL-RL 与 Isaac Lab 的 API 配对以及 GO2-PIPER USD 是否还是 LFS 指针。
 `prepare` 仅执行 `pip install --no-deps -e source/LeggedManip_Lab`；缺失的 TensorBoard/Isaac/导出依赖需要在已有环境内补齐。
 任何子进程失败均停止当前流程并返回非零状态；smoke 通过表示接口和短 PPO 能运行，不表示行走性能合格。
 默认 4096 个环境是训练起点，不保证所有 GPU 都能承载；显存不足时先改为 1024 或 2048。

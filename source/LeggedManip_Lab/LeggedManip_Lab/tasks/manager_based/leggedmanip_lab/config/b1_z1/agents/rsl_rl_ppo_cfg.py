@@ -14,7 +14,7 @@
 
 from isaaclab.utils import configclass
 
-from isaaclab_rl.rsl_rl import (
+from LeggedManip_Lab.rsl_rl_compat import (
     RslRlOnPolicyRunnerCfg,
     RslRlMLPModelCfg,
     RslRlPpoAlgorithmCfg,

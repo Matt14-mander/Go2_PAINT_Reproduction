@@ -25,7 +25,8 @@
 
 ## 安装与检查
 
-使用仓库 README 要求的 **Isaac Sim 5.1.0、Python 3.11、带新版 RSL-RL 配置 API 的 Isaac Lab、rsl-rl-lib >=5.0.1** 环境。
+使用 **Isaac Sim 5.1.0、Python 3.11**。项目兼容层支持两组配套接口：旧版 Isaac Lab policy/TensorDict + **RSL-RL 3.x >=3.0.1**，或新版 actor/critic + **RSL-RL >=5.0.1**。
+不要仅根据 RSL-RL 版本升级环境；先用 `python scripts/paint/server_train.py diagnose` 检查实际源码接口。
 本任务沿用现有项目的 PhysX `root_physx_view` 和 `set_external_force_and_torque` API，不能保证未来任意 Isaac Lab main 提交兼容。
 服务器实际使用的 Isaac Lab 提交应记录在实验中；不要为本任务直接升级已有可用环境。
 以下命令在仓库根目录运行，Python 应指向已安装 Isaac Lab 的环境。

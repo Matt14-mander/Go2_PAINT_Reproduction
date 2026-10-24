@@ -68,13 +68,12 @@ Each platform supports the following **2** training modes:
   We recommend using the conda installation as it simplifies calling Python scripts from the terminal.
 
 > [!IMPORTANT]
-> This repository currently targets the Isaac Lab `main` branch with the newer RSL-RL config API.
-> Please do **not** use the Isaac Lab `v2.3.2` release tag, since it depends on `rsl-rl-lib==3.1.2` and is incompatible with the current agent configs.
+> Agent configs use a project-local compatibility layer. Use a matched pair:
+> legacy Isaac Lab policy/TensorDict API with RSL-RL `3.x >=3.0.1`, or the modern actor/critic API with RSL-RL `>=5.0.1`.
 >
 > Required:
 > - Isaac Sim: `5.1.0`
-> - Isaac Lab: `main` branch
-> - rsl-rl-lib: `>=5.0.1`
+> - Isaac Lab / rsl-rl-lib: matched APIs as described above
 > - Python: `3.11`
 
 **[Recommended one-click install](https://docs.robotsfan.com/isaaclab/source/setup/oneclick_installation.html)**:
@@ -89,7 +88,7 @@ After installation, please verify the installed RSL-RL version:
 python -m pip show rsl-rl-lib
 ```
 
-The version should be `5.0.1` or newer. If it shows `3.1.2`, you are likely using the Isaac Lab `v2.3.2` release tag, which is not compatible with this repository.
+Run `python scripts/paint/server_train.py diagnose` to inspect the installed adapter API. Do not upgrade RSL-RL independently of Isaac Lab. See [server training](docs/PAINT_SERVER_TRAINING_CN.md).
 
 ### Install LeggedManip Lab
 

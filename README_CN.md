@@ -69,14 +69,12 @@ GO2-PIPER 的 PAINT 底层 locomotion 改造：[任务、训练与冻结策略�
   推荐使用 conda 安装方式，因为它可以更方便地在终端中调用 Python 脚本。
 
 > [!IMPORTANT]
-> 本仓库当前面向 Isaac Lab `main` branch 中较新的 RSL-RL 配置 API。
-> 请不要使用 Isaac Lab `v2.3.2` release tag，因为该版本依赖 `rsl-rl-lib==3.1.2`，与当前 agent 配置不兼容。
+> Agent 配置已加入项目内兼容层，请使用配套接口：旧版 Isaac Lab policy/TensorDict + RSL-RL `3.x >=3.0.1`，或新版 actor/critic + RSL-RL `>=5.0.1`。
 >
 > 依赖要求：
 >
 > * Isaac Sim: `5.1.0`
-> * Isaac Lab: `main` branch
-> * rsl-rl-lib: `>=5.0.1`
+> * Isaac Lab / rsl-rl-lib: 使用上述配套 API
 > * Python: `3.11`
 
 **[推荐一键安装脚本](https://docs.robotsfan.com/isaaclab/source/setup/oneclick_installation.html)**：
@@ -91,7 +89,7 @@ wget -O install_isaaclab.sh https://docs.robotsfan.com/install_isaaclab.sh && ba
 python -m pip show rsl-rl-lib
 ```
 
-版本应为 `5.0.1` 或更高。如果显示为 `3.1.2`，则很可能安装的是 Isaac Lab `v2.3.2` release tag，该版本与本仓库当前代码不兼容。
+使用 `python scripts/paint/server_train.py diagnose` 检查实际接口，不要单独升级 RSL-RL。详见[服务器训练说明](docs/PAINT_SERVER_TRAINING_CN.md)。
 
 
 ### 安装 LeggedManip Lab

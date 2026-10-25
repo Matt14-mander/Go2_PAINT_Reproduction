@@ -41,9 +41,63 @@ Teacher 观测为机械臂8帧干净历史（相对角度6、速度6、上一控
 
 ## 服务器运行
 
+### 桌面演示：主动搬运8米（推荐）
+
+旧入口默认是**受力跟随**：箱体上施加8N总外力，参考控制器把它均分，换算出两台机器人各约0.1m/s的速度指令。因此物体既受到外力作用，也受到机器人腿部主动行走的作用，不能仅凭移动判断是在主动运输。
+
+新增 **`--drive velocity` 主动搬运模式**：默认外力为0，世界坐标速度直接进入手写高层协调器，由真实 LL/PD 驱动机器人带着箱体运动。该模式用于协同搬运 pipeline 展示，不是训练好的 Teacher 策略。原有 `--drive wrench` 和 Teacher 接口保留。
+
+同步更新 `paint_cooperate.py`、`cooperative_scene.py`，以及新增的 **`cooperative_control.py`**。在服务器图形桌面的终端执行：
+
+```bash
+conda activate limx
+cd ~/workspace/Go2_PAINT_Reproduction
+DEMO=mujoco/deploy/deploy_mujoco/go2_piper/paint_cooperate.py
+LL="$PWD/logs/rsl_rl/go2_piper_paint_loco/2026-10-24_18-05-41_train_flat_20261024_180532_13553c07/exported/policy.pt"
+
+python "$DEMO" --ll-policy "$LL" \
+  --controller reference --drive velocity \
+  --command-world 0.3 0 0 --max-speed 0.35 \
+  --duration 60 --travel-distance 8 \
+  --report logs/mujoco_coop/active_8m.json
+```
+
+直接打开窗口，不加 headless/video 参数。开始2秒站稳，3秒加速；接近世界坐标直线目标时自动减速、修正横向偏离并保持，运行到60秒或关闭窗口。0.3m/s是期望速度，8米是目标，不能保证实际策略一定完成；JSON 的 `goal_error_m`、`goal_reached`（位置误差<0.15m）报告实际情况。到达后没有直接退出，便于观察负载下停车稳定性；末尾3秒也会逐渐撤除速度指令。
+
+速度、转向均有限幅；全组平动加速度上限0.15m/s²，偏航加速度上限0.4rad/s²。主动模式通过航向反馈抑制长时间直行时的偏航漂移。地面每1米有非碰撞标线，每5米加色，跟随相机时也能观察位移；终端显示 `travel_xy`（距初始箱体位置的水平直线位移）与 `actual_body`（各机平均机体系速度），不把初始落地高度变化算作运输距离。
+
+图形同步由每物理步200Hz降低为最高约60Hz（默认200Hz物理步下实际约50Hz），物理和策略频率保持不变，减少桌面渲染引起的慢放。窗口按真实时间推进；鼠标仍可旋转/缩放相机。
+
+### 桌面键盘控制
+
+希望自由走得更远、调速或转向时，不指定距离目标，改用：
+
+```bash
+python "$DEMO" --ll-policy "$LL" \
+  --controller reference --drive velocity \
+  --command-world 0.3 0 0 --max-speed 0.35 \
+  --keyboard --duration 300 \
+  --report logs/mujoco_coop/keyboard.json
+```
+
+点击窗口使其获得键盘焦点。按键修改**世界坐标**速度指令，每次按键生效一次：
+
+| 按键 | 操作 |
+|---|---|
+| W / S | 世界X速度增加 / 减少0.05m/s |
+| A / D | 世界Y速度增加 / 减少0.05m/s |
+| Q / E | 偏航速度增加 / 减少0.1rad/s |
+| X | 请求平滑停车，仍受减速度上限约束 |
+| R | 恢复命令行初始速度 |
+| P | 暂停 / 继续物理仿真，暂停期间不消耗仿真时长 |
+
+方向键式速度控制只作用于 reference/velocity 模式，不覆盖 Teacher 输出。键盘控制和固定距离目标不能同时开启。新增高速度、转弯以及长时间真实权重运行仍需逐步验证；若发生跌倒或抓取误差，仍会停止并保存报告。
+
+### 原受力跟随模式
+
 无需 Isaac Sim、RSL-RL，也不用停止当前训练。依赖与原 `paint_loco.py` 相同：MuJoCo3.2.7、CPU可用的PyTorch、NumPy、PyYAML；录像需要 imageio/ffmpeg。
 
-需同步：`paint_cooperate.py`、`cooperative_scene.py`、原有 `paint_loco.py/paint_loco.yaml`，以及整个 `mujoco/robots/go2_piper/` 的真实网格。没有新增需要下载的机器人资产。
+需同步：`paint_cooperate.py`、`cooperative_scene.py`、`cooperative_control.py`、原有 `paint_loco.py/paint_loco.yaml`，以及整个 `mujoco/robots/go2_piper/` 的真实网格。没有新增需要下载的机器人资产。
 
 ```bash
 conda activate limx
@@ -63,7 +117,7 @@ python "$DEMO" --ll-policy "$LL" --headless --duration 20 \
   --force-world 8 0 0 --report logs/mujoco_coop/reference_forward.json
 ```
 
-开头2秒只站立，接下来2秒逐渐增加外力，末尾2秒撤力；`--force-world` 的三个值是世界坐标 `Fx N、Fy N、Tz Nm`，只施加在箱体上。默认 `--max-speed .25 --max-yaw-rate .4`，底盘命令小于0.05时置零。全组控制是参考导纳，执行腿运动仍依赖真实 LL 策略，不能保证仅凭场景搭建就稳定行走。
+开头2秒只站立，接下来3秒逐渐增加外力，末尾3秒撤力；`--force-world` 的三个值是世界坐标 `Fx N、Fy N、Tz Nm`，只施加在箱体上。默认 `--max-speed .35 --max-yaw-rate .4`，底盘命令小于0.05时置零。全组控制是参考导纳，执行腿运动仍依赖真实 LL 策略，不能保证仅凭场景搭建就稳定行走。
 
 无桌面服务器录像（先通过无渲染测试）：
 

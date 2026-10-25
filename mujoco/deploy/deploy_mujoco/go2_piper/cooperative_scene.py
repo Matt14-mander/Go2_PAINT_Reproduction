@@ -35,6 +35,11 @@ def build_scene(count=2, spacing=1.2, mass=.5, timestep=.005):
     ET.SubElement(sections["asset"], "material", name="ground", texture="ground_tex", texrepeat="4 4", texuniform="true")
     ET.SubElement(sections["worldbody"], "geom", name="floor", type="plane", size="0 0 .05", material="ground", friction="1 .02 .002")
     ET.SubElement(sections["worldbody"], "light", pos="0 0 5", dir="0 0 -1", directional="true")
+    # Non-colliding one-meter progress marks: reveal travel even as camera follows.
+    for meter in range(-5, 41):
+        ET.SubElement(sections["worldbody"], "geom", name=f"road_mark_{meter}", type="box",
+                      pos=f"{meter} 0 .001", size=".012 4 .0005", contype="0", conaffinity="0",
+                      rgba=".9 .65 .15 .7" if meter % 5 == 0 else ".7 .75 .8 .5")
     reference_attrs = {"name", "class", "childclass", "mesh", "material", "texture", "joint", "joint1", "joint2",
                        "body", "body1", "body2", "site", "site1", "site2", "objname", "target", "actuator", "tendon"}
     offsets = (np.arange(count) - (count - 1) / 2) * spacing

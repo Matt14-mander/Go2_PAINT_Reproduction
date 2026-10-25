@@ -20,6 +20,7 @@ import torch
 import yaml
 
 from cooperative_scene import build_scene, initialize_scene
+from cooperative_control import DesktopCommand, motion_profile, slew_command, velocity_target
 from paint_loco import JOINT_NAMES, MUJOCO_ROOT, PaintBridge, named_id
 
 
@@ -127,10 +128,6 @@ def grasp_reaction(model, data, eq_id, payload):
     return -np.linalg.solve(spatial.T, generalized[dofs])
 
 
-def force_profile(time_s, duration, settle=2., ramp=2.):
-    return float(np.clip(min((time_s - settle) / ramp, (duration - time_s) / ramp), 0, 1))
-
-
 class CooperativeDemo:
     def __init__(self, cfg, count=2, mass=.5, spacing=1.2, self_collisions=False):
         xml, assets, self.offsets = build_scene(count, spacing, mass, cfg["simulation_dt"])
@@ -161,12 +158,17 @@ class CooperativeDemo:
         force, torque = rotation.T @ wrench[:3], rotation.T @ wrench[3:]
         return np.clip([force[0] / 40., force[1] / 40., torque[2] / 10.], -1, 1).astype(np.float32)
 
-    def reference_action(self, index, external_world, formation_gain, max_speed, max_yaw):
+    def reference_action(self, index, external_world, formation_gain, max_speed, max_yaw,
+                         world_command=None, heading_target=None):
         robot = self.robots[index]
         # Whole-group admittance to the applied horizontal force. This controller
         # has privileged force and formation state; it is not a trained teacher.
         world = external_world[:3] / (40. * len(self.robots))
         world[2] = 0
+        yaw_command = external_world[5] / (10. * len(self.robots))
+        if world_command is not None:
+            world = np.r_[np.asarray(world_command)[:2], 0.]
+            yaw_command = world_command[2]
         centers = np.array([self.data.xpos[r.base] for r in self.robots])
         payload_rotation = self.data.xmat[self.payload].reshape(3, 3)
         desired = centers.mean(0) + payload_rotation @ [0, self.offsets[index], 0]
@@ -175,8 +177,9 @@ class CooperativeDemo:
         command = rotation.T @ world
         yaw = np.arctan2(rotation[1, 0], rotation[0, 0])
         payload_yaw = np.arctan2(payload_rotation[1, 0], payload_rotation[0, 0])
-        yaw_error = np.arctan2(np.sin(payload_yaw - yaw), np.cos(payload_yaw - yaw))
-        command[2] = np.clip(external_world[5] / (10. * len(self.robots)) + .5 * yaw_error, -max_yaw, max_yaw)
+        desired_heading = payload_yaw if heading_target is None else heading_target
+        yaw_error = np.arctan2(np.sin(desired_heading - yaw), np.cos(desired_heading - yaw))
+        command[2] = np.clip(yaw_command + .5 * yaw_error, -max_yaw, max_yaw)
         command[:2] = np.clip(command[:2], -max_speed, max_speed)
         return np.r_[command, np.zeros(6)]
 
@@ -206,12 +209,19 @@ def main():
     parser.add_argument("--ll-policy", type=Path, nargs="+", required=True)
     parser.add_argument("--hl-policy", type=Path, nargs="+", default=[])
     parser.add_argument("--controller", choices=("reference", "teacher"), default="reference")
+    parser.add_argument("--drive", choices=("wrench", "velocity"), default="wrench")
+    parser.add_argument("--command-world", nargs=3, type=float, default=[.3, 0., 0.], metavar=("VX", "VY", "WZ"))
+    parser.add_argument("--travel-distance", type=float, help="Optional straight-line goal distance in meters; holds near goal")
+    parser.add_argument("--keyboard", action="store_true", help="Reference velocity mode: W/S A/D Q/E, X stop, R resume, P pause")
+    parser.add_argument("--settle-seconds", type=float, default=2.)
+    parser.add_argument("--ramp-seconds", type=float, default=3.)
     parser.add_argument("--wrench-source", choices=("external-share", "grasp"), default="external-share")
     parser.add_argument("--num-robots", type=int, default=2)
     parser.add_argument("--spacing", type=float, default=1.2)
     parser.add_argument("--payload-mass", type=float, default=.5)
-    parser.add_argument("--force-world", nargs=3, type=float, default=[8., 0., 0.], metavar=("FX", "FY", "TZ"))
-    parser.add_argument("--max-speed", type=float, default=.25)
+    parser.add_argument("--force-world", nargs=3, type=float, metavar=("FX", "FY", "TZ"),
+                        help="Defaults to [8,0,0] in wrench mode; [0,0,0] in velocity mode")
+    parser.add_argument("--max-speed", type=float, default=.35)
     parser.add_argument("--max-yaw-rate", type=float, default=.4)
     parser.add_argument("--formation-gain", type=float, default=.4)
     parser.add_argument("--self-collisions", action="store_true")
@@ -220,10 +230,18 @@ def main():
     parser.add_argument("--video", type=Path)
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--camera-azimuth", type=float, default=0.)
+    parser.add_argument("--viewer-fps", type=int, default=60)
     parser.add_argument("--report", type=Path)
     parser.add_argument("--check-only", action="store_true")
     args = parser.parse_args()
-    if not np.isfinite([args.spacing, args.payload_mass, args.duration, args.max_speed, args.max_yaw_rate, args.formation_gain, args.camera_azimuth, *args.force_world]).all():
+    if args.force_world is None:
+        args.force_world = [8., 0., 0.] if args.drive == "wrench" else [0., 0., 0.]
+    numbers = [args.spacing, args.payload_mass, args.duration, args.max_speed, args.max_yaw_rate,
+               args.formation_gain, args.camera_azimuth, args.settle_seconds, args.ramp_seconds,
+               *args.force_world, *args.command_world]
+    if args.travel_distance is not None:
+        numbers.append(args.travel_distance)
+    if not np.isfinite(numbers).all():
         parser.error("All numeric parameters must be finite")
     if args.duration <= 0 or args.fps < 1 or not 0 < args.max_speed <= 1 or not 0 < args.max_yaw_rate <= 1.5 or args.formation_gain < 0:
         parser.error("Expected duration/fps > 0, speed in (0,1], yaw rate in (0,1.5], formation gain >= 0")
@@ -231,6 +249,17 @@ def main():
         parser.error("teacher mode requires exported 147->9 --hl-policy")
     if args.controller == "reference" and args.hl_policy:
         parser.error("Use --controller teacher to enable --hl-policy")
+    if args.settle_seconds < 0 or args.ramp_seconds <= 0 or args.viewer_fps < 1:
+        parser.error("Expected settle >= 0, ramp > 0, viewer fps > 0")
+    if args.drive == "velocity" and args.controller != "reference":
+        parser.error("Velocity drive is a reference-controller demo; Teacher uses wrench drive")
+    if args.keyboard and (args.headless or args.drive != "velocity"):
+        parser.error("Keyboard requires desktop reference velocity mode")
+    if args.travel_distance is not None and (args.travel_distance <= 0 or args.drive != "velocity" or args.keyboard
+                                              or np.linalg.norm(args.command_world[:2]) == 0 or args.command_world[2] != 0):
+        parser.error("Distance goal requires velocity drive, nonzero translation, zero yaw, no keyboard")
+    if np.any(np.abs(args.command_world) > [args.max_speed, args.max_speed, args.max_yaw_rate]) and args.drive == "velocity":
+        parser.error("World command exceeds max-speed/max-yaw-rate")
     cfg = yaml.safe_load(args.config.read_text(encoding="utf-8"))
     if int(cfg["control_decimation"]) != 4 or float(cfg["simulation_dt"]) != .005:
         parser.error("Current deployment contract is 200Hz physics / 50Hz control")
@@ -246,11 +275,16 @@ def main():
         print(f"[COOP] Initial status: {json.dumps(demo.status())}", flush=True)
         return 0
     model, data = demo.model, demo.data
+    desktop = DesktopCommand(args.command_world, args.max_speed, args.max_yaw_rate)
     if args.headless:
         context = nullcontext(None)
     else:
         from mujoco import viewer
-        context = viewer.launch_passive(model, data)
+        context = viewer.launch_passive(model, data, key_callback=desktop.on_key if args.keyboard else None)
+    if args.keyboard:
+        print("[COOP] Click viewer: W/S forward/back, A/D left/right, Q/E yaw, X stop, R resume, P pause", flush=True)
+    print(f"[COOP] drive={args.drive}; force_world={args.force_world}; world_command={args.command_world}; "
+          f"distance_goal={args.travel_distance}", flush=True)
     path = args.report or MUJOCO_ROOT.parent / f"logs/mujoco_coop/coop_{datetime.now():%Y%m%d_%H%M%S_%f}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     trace_path = path.with_suffix(".csv")
@@ -262,6 +296,9 @@ def main():
     clipped = np.zeros(args.num_robots, int)
     initial_payload = data.xpos[demo.payload].copy()
     external = np.zeros(6)
+    group_command = np.zeros(3)
+    heading_target = 0.
+    next_gui = 0.
     final_status = demo.status()
     warnings_before = data.warning.number.copy()
     try:
@@ -274,17 +311,25 @@ def main():
         camera.distance, camera.elevation, camera.azimuth = max(3., args.num_robots * 1.3), -25, args.camera_azimuth
         with trace_path.open("w", newline="", encoding="utf-8") as stream, context as display:
             if display is not None:
-                display.cam.distance, display.cam.azimuth, display.cam.elevation = camera.distance, camera.azimuth, camera.elevation
+                with display.lock():
+                    display.cam.distance, display.cam.azimuth, display.cam.elevation = camera.distance, camera.azimuth, camera.elevation
             trace = csv.writer(stream)
             trace.writerow(["time_s", "robot", "reference_cx", "reference_cy", "reference_cz", "raw_vx", "raw_vy", "raw_wz",
                             "command_vx", "command_vy", "command_wz", "actual_vx", "actual_vy", "actual_wz", "tilt_deg", "grasp_error_m"])
-            for step in range(int(round(args.duration / model.opt.timestep))):
+            step = 0
+            while step < int(round(args.duration / model.opt.timestep)):
                 wall = time.monotonic()
                 if display is not None and not display.is_running():
                     reason = "viewer_closed"
                     break
+                requested, paused = desktop.snapshot()
+                if args.keyboard and paused:
+                    display.sync()
+                    time.sleep(.01)
+                    continue
                 external[:] = 0
-                external[[0, 1, 5]] = np.asarray(args.force_world) * force_profile(data.time, args.duration)
+                external[[0, 1, 5]] = np.asarray(args.force_world) * motion_profile(
+                    data.time, args.duration, args.settle_seconds, args.ramp_seconds)
                 data.xfrc_applied[:] = 0
                 data.xfrc_applied[demo.payload] = external
                 if step % 4 == 0:
@@ -300,12 +345,19 @@ def main():
                             reason = f"robot_{index}_grasp_error"
                     if reason != "completed":
                         break
+                    if args.drive == "velocity":
+                        target = velocity_target(requested, data.time, args.duration, data.xpos[demo.payload], initial_payload,
+                                                 args.settle_seconds, args.ramp_seconds, args.travel_distance)
+                        group_command = slew_command(group_command, target, 4 * model.opt.timestep)
+                        heading_target += group_command[2] * 4 * model.opt.timestep
                     for index, robot in enumerate(demo.robots):
                         if controls:
                             robot.push_history()
                         reference = demo.normalized_wrench(robot, external, args.wrench_source)
                         raw = highs[index](robot.teacher_observation(reference)) if highs else demo.reference_action(
-                            index, external, args.formation_gain, args.max_speed, args.max_yaw_rate)
+                            index, external, args.formation_gain, args.max_speed, args.max_yaw_rate,
+                            group_command if args.drive == "velocity" else None,
+                            heading_target if args.drive == "velocity" else None)
                         limits = np.array([args.max_speed, args.max_speed, args.max_yaw_rate])
                         clipped[index] += int(np.any(np.abs(raw[:3]) > limits + 1e-6))
                         robot.command = np.clip(raw[:3], -limits, limits)
@@ -317,12 +369,16 @@ def main():
                                         *state["actual_vx_vy_wz"], state["tilt_deg"], state["grasp_error_m"]])
                     controls += 1
                     if controls == 1 or controls % 50 == 0:
+                        displacement = data.xpos[demo.payload] - initial_payload
+                        mean_actual = np.mean([s["actual_vx_vy_wz"] for s in final_status], axis=0)
                         print(f"[COOP] t={data.time:.2f}s payload={data.xpos[demo.payload].round(3)} "
-                              f"tilt={peak_tilt.round(1)} grasp={peak_grasp.round(4)}", flush=True)
+                              f"travel_xy={np.linalg.norm(displacement[:2]):.2f}m world_cmd={group_command.round(2)} "
+                              f"actual_body={mean_actual.round(2)} tilt={peak_tilt.round(1)} grasp={peak_grasp.round(4)}", flush=True)
                 for robot in demo.robots:
                     robot.write_torques()
                 before = data.time
                 mujoco.mj_step(model, data)
+                step += 1
                 if not np.isfinite(data.qpos).all() or not np.isfinite(data.qvel).all() or data.time <= before or np.any(data.warning.number > warnings_before):
                     reason = "invalid_physics_or_solver_warning"
                     break
@@ -332,8 +388,11 @@ def main():
                     writer.append_data(renderer.render())
                     next_frame += 1 / args.fps
                 if display is not None:
-                    display.cam.lookat[:] = camera.lookat
-                    display.sync()
+                    if data.time >= next_gui:
+                        with display.lock():
+                            display.cam.lookat[:] = camera.lookat
+                        display.sync()
+                        next_gui = data.time + 1 / args.viewer_fps
                     time.sleep(max(0, model.opt.timestep - (time.monotonic() - wall)))
     finally:
         if writer is not None:
@@ -342,6 +401,9 @@ def main():
             renderer.close()
     mujoco.mj_forward(model, data)
     report = {"reason": reason, "controller": args.controller, "robots": args.num_robots, "payload_mass_kg": args.payload_mass,
+              "drive": args.drive, "command_world_vx_vy_wz": args.command_world,
+              "final_requested_world_command": desktop.snapshot()[0].tolist(),
+              "travel_distance_goal_m": args.travel_distance,
               "wrench_source": args.wrench_source, "force_world_Fx_Fy_Tz": args.force_world,
               "sim_time_s": float(data.time), "wall_time_s": time.monotonic() - started, "control_steps": controls,
               "payload_displacement_world_m": (data.xpos[demo.payload] - initial_payload).tolist(),
@@ -350,6 +412,12 @@ def main():
               "final_status": demo.status(), "self_collisions": args.self_collisions,
               "ll_policies": [{"path": str(p.path), "sha256": p.sha256} for p in lows],
               "hl_policies": [{"path": str(p.path), "sha256": p.sha256} for p in highs], "trace": str(trace_path)}
+    if args.travel_distance is not None:
+        direction = np.asarray(args.command_world[:2]) / np.linalg.norm(args.command_world[:2])
+        goal = initial_payload[:2] + direction * args.travel_distance
+        report["goal_position_world_xy_m"] = goal.tolist()
+        report["goal_error_m"] = float(np.linalg.norm(data.xpos[demo.payload, :2] - goal))
+        report["goal_reached"] = report["goal_error_m"] < .15
     path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"[COOP] {json.dumps(report)}\n[COOP] Report: {path}", flush=True)
     return 0 if reason in ("completed", "viewer_closed") else 2

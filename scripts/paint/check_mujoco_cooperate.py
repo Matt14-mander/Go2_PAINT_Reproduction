@@ -13,6 +13,7 @@ import yaml
 ENTRY = Path(__file__).resolve().parents[2] / "mujoco/deploy/deploy_mujoco/go2_piper"
 sys.path.insert(0, str(ENTRY))
 from paint_cooperate import CooperativeDemo, TorchActor, grasp_reaction, policy_paths  # noqa: E402
+from cooperative_control import DesktopCommand, slew_command, velocity_target  # noqa: E402
 
 
 class CooperativeChecks(unittest.TestCase):
@@ -20,6 +21,40 @@ class CooperativeChecks(unittest.TestCase):
     def setUpClass(cls):
         cls.cfg = yaml.safe_load((ENTRY / "paint_loco.yaml").read_text(encoding="utf-8"))
         torch.set_num_threads(1)
+
+    def test_active_transport_needs_no_payload_pull(self):
+        demo = CooperativeDemo(self.cfg)
+        for index, robot in enumerate(demo.robots):
+            result = demo.reference_action(index, np.zeros(6), .4, .35, .4,
+                                           world_command=np.array([.3, 0, 0]), heading_target=0.)
+            np.testing.assert_allclose(result, [.3, 0, 0, 0, 0, 0, 0, 0, 0], atol=1e-7)
+        np.testing.assert_allclose(demo.data.xfrc_applied, 0)
+
+    def test_motion_ramp_braking_and_slew(self):
+        command = [.3, 0, 0]
+        np.testing.assert_allclose(velocity_target(command, 0, 60, [0, 0, 0], [0, 0, 0]), 0)
+        np.testing.assert_allclose(velocity_target(command, 3.5, 60, [0, 0, 0], [0, 0, 0]), [.15, 0, 0])
+        np.testing.assert_allclose(velocity_target(command, 10, 60, [0, 0, 0], [0, 0, 0], distance=8), command)
+        near = velocity_target(command, 30, 60, [7.9, .1, 0], [0, 0, 0], distance=8)
+        np.testing.assert_allclose(near, [.06, -.05, 0], atol=1e-7)
+        np.testing.assert_allclose(velocity_target(command, 30, 60, [8, 0, 0], [0, 0, 0], distance=8), 0)
+        value = slew_command(np.zeros(3), np.array([.3, .3, 1.]), .02)
+        self.assertAlmostEqual(np.linalg.norm(value[:2]), .003)
+        self.assertAlmostEqual(value[2], .008)
+
+    def test_keyboard_stop_resume_pause_and_limits(self):
+        keyboard = DesktopCommand([.3, 0, 0], .35, .4)
+        for _ in range(3):
+            keyboard.on_key(ord("W"))
+        self.assertAlmostEqual(keyboard.snapshot()[0][0], .35)
+        keyboard.on_key(ord("X"))
+        np.testing.assert_allclose(keyboard.snapshot()[0], 0)
+        keyboard.on_key(ord("R"))
+        np.testing.assert_allclose(keyboard.snapshot()[0], [.3, 0, 0])
+        keyboard.on_key(ord("P"))
+        self.assertTrue(keyboard.snapshot()[1])
+        keyboard.on_key(ord("P"))
+        self.assertFalse(keyboard.snapshot()[1])
 
     def test_two_and_three_robot_names_grasps_and_free_payload(self):
         for count in (2, 3):

@@ -153,6 +153,11 @@ tensorboard --logdir logs/rsl_rl --host 127.0.0.1 --port 6006
 
 ## 5. 权重评估与导出
 
+旧版 Isaac Lab 可能没有 `isaaclab_rl.utils.pretrained_checkpoint`。新版 `play.py` 仅在显式传入 `--use_pretrained_checkpoint` 时导入该可选功能；使用自己训练的权重应传 `--checkpoint`。
+若旧脚本在这一行报 `ModuleNotFoundError`，同步最新 `scripts/rsl_rl/play.py` 后重试，无须重训或升级环境。
+相关路由已通过 5 项无仿真回归检查：`python scripts/paint/check_play_checkpoint.py`。
+Kit 的数据库锁定警告与 Python 的模块导入异常需要分别判断；不要因这条导入异常直接结束其他 GPU 进程。
+
 ```bash
 python scripts/rsl_rl/play.py --task GO2-PIPER-PAINT-Loco-Rough-Play \
   --checkpoint /absolute/path/to/actual/model.pt \

@@ -93,7 +93,6 @@ from isaaclab_rl.rsl_rl import (
     export_policy_as_onnx,
 )
 from LeggedManip_Lab.rsl_rl_compat import RslRlBaseRunnerCfg, handle_deprecated_rsl_rl_cfg
-from isaaclab_rl.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path
@@ -126,6 +125,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     log_root_path = os.path.abspath(log_root_path)
     print(f"[INFO] Loading experiment from directory: {log_root_path}")
     if args_cli.use_pretrained_checkpoint:
+        # Older Isaac Lab releases have no isaaclab_rl.utils package. Local
+        # checkpoints and run-directory lookup must not depend on this feature.
+        try:
+            from isaaclab_rl.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
+        except ModuleNotFoundError as error:
+            if error.name not in ("isaaclab_rl.utils", "isaaclab_rl.utils.pretrained_checkpoint"):
+                raise
+            raise RuntimeError(
+                "This Isaac Lab installation does not provide published-checkpoint lookup. "
+                "Omit --use_pretrained_checkpoint and pass --checkpoint /path/to/model.pt instead."
+            ) from error
         resume_path = get_published_pretrained_checkpoint("rsl_rl", train_task_name)
         if not resume_path:
             print("[INFO] Unfortunately a pre-trained checkpoint is currently unavailable for this task.")
@@ -237,7 +247,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
 
 if __name__ == "__main__":
-    # run the main function
-    main()
-    # close sim app
-    simulation_app.close()
+    try:
+        main()
+    finally:
+        simulation_app.close()

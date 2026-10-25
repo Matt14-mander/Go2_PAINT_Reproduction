@@ -1,0 +1,19 @@
+# Nominal values from the PAINT GO2-PIPER Isaac config, not the old 18-action policy.
+xml_path: robots/go2_piper/scene.xml
+base_body: base_link
+simulation_dt: 0.005
+control_decimation: 4
+initial_base_height: 0.35
+action_scale: 0.25
+action_clip: 4.0
+default_joint_pos: [-0.1, 0.8, -1.5, 0.1, 0.8, -1.5, -0.1, 1.0, -1.5, 0.1, 1.0, -1.5,
+                    0.0, 0.8, -1.2, 0.0, 0.4, 0.0]
+kp: [30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 50, 50, 80, 30, 30, 20]
+kd: [0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 3, 2, 3, 3, 2.5, 1]
+# Deterministic nominal baseline. Set delay_steps to 1..4 for later robustness tests.
+delay_steps: 0
+# This entry point analytically reconstructs a flat-plane height scan only.
+floor_geom: floor
+height_scan_offset: 0.5
+height_scan_count: 187
+disable_self_collisions: true

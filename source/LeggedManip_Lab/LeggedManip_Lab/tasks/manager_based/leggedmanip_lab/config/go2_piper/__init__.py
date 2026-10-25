@@ -1,6 +1,20 @@
 import gymnasium as gym
 from . import agents
 
+# Shared transport environment: teacher policy by default; student history is
+# available as a separate observation group for later estimator/distillation work.
+for terrain, env_class in (("Flat", "Go2PiperPaintTransportEnvCfg"),
+                           ("Rough", "Go2PiperPaintTransportRoughEnvCfg")):
+    gym.register(
+        id=f"GO2-PIPER-PAINT-Transport-{terrain}",
+        entry_point="LeggedManip_Lab.tasks.manager_based.leggedmanip_lab.transport_env:PaintTransportEnv",
+        disable_env_checker=True,
+        kwargs={
+            "env_cfg_entry_point": f"{__name__}.transport_env_cfg:{env_class}",
+            "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:Go2PiperPaintTransportPPORunnerCfg",
+        },
+    )
+
 # PAINT low-level replacement: identical actor/action interfaces on Flat and Rough.
 for terrain, env_class, runner_class in (
     ("Flat", "Go2PiperPaintLocoEnvCfg", "Go2PiperPaintLocoPPORunnerCfg"),

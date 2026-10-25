@@ -112,3 +112,18 @@ class Go2PiperPaintLocoPPORunnerCfg(Go2PiperFlatPPORunnerCfg):
 class Go2PiperPaintLocoRoughPPORunnerCfg(Go2PiperPaintLocoPPORunnerCfg):
     experiment_name = "go2_piper_paint_loco_rough"
 
+
+@configclass
+class Go2PiperPaintTransportPPORunnerCfg(Go2PiperFlatPPORunnerCfg):
+    """Teacher PPO wiring for environment integration; no student algorithm here."""
+    experiment_name = "go2_piper_paint_transport_teacher"
+    max_iterations = 15000
+    save_interval = 200
+    clip_actions = None  # the transport term applies per-component limits
+
+    def __post_init__(self):
+        # Preserve legacy/native policy construction from the compatibility base.
+        super().__post_init__()
+        self.actor.obs_normalization = False
+        self.critic.obs_normalization = False
+

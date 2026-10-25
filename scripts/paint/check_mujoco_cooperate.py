@@ -13,7 +13,8 @@ import yaml
 ENTRY = Path(__file__).resolve().parents[2] / "mujoco/deploy/deploy_mujoco/go2_piper"
 sys.path.insert(0, str(ENTRY))
 from paint_cooperate import CooperativeDemo, TorchActor, grasp_reaction, policy_paths  # noqa: E402
-from cooperative_control import DesktopCommand, slew_command, velocity_target  # noqa: E402
+from cooperative_control import DesktopCommand, WrenchFollower, slew_command, velocity_target  # noqa: E402
+from cooperative_visuals import draw_guidance  # noqa: E402
 
 
 class CooperativeChecks(unittest.TestCase):
@@ -28,6 +29,41 @@ class CooperativeChecks(unittest.TestCase):
             result = demo.reference_action(index, np.zeros(6), .4, .35, .4,
                                            world_command=np.array([.3, 0, 0]), heading_target=0.)
             np.testing.assert_allclose(result, [.3, 0, 0, 0, 0, 0, 0, 0, 0], atol=1e-7)
+        np.testing.assert_allclose(demo.data.xfrc_applied, 0)
+
+    def test_local_force_follower_bias_direction_release_and_independence(self):
+        follower, other = WrenchFollower(), WrenchFollower()
+        rotation = np.eye(3)
+        static = np.array([1., 0., -2.45, 0., .6, 0.])
+        for _ in range(50):
+            np.testing.assert_allclose(follower.update(static, rotation, .02, calibrating=True), 0)
+        np.testing.assert_allclose(follower.update(static, rotation, .02), 0)
+        for _ in range(150):
+            output = follower.update(static + [8., 0., 0., 0., 0., 0.], rotation, .02)
+        self.assertAlmostEqual(output[0], .2, places=4)
+        np.testing.assert_allclose(other.command, 0)
+        for _ in range(150):
+            output = follower.update(static, rotation, .02)
+        self.assertLess(np.linalg.norm(output), .001)
+        quarter_turn = np.array([[0., -1., 0.], [1., 0., 0.], [0., 0., 1.]])
+        follower = WrenchFollower()
+        for _ in range(150):
+            output = follower.update([8, 0, 0, 0, 0, 0], quarter_turn, .02)
+        self.assertAlmostEqual(output[1], -.2, places=4)
+
+    def test_force_keyboard_and_non_physical_arrow(self):
+        keyboard = DesktopCommand([16, 0, 0], 80, 10, linear_step=2, yaw_step=.5, label="force")
+        keyboard.on_key(ord("W"))
+        keyboard.on_key(ord("Q"))
+        np.testing.assert_allclose(keyboard.snapshot()[0], [18, 0, .5])
+        keyboard.on_key(ord("X"))
+        np.testing.assert_allclose(keyboard.snapshot()[0], 0)
+        demo = CooperativeDemo(self.cfg)
+        qpos_before = demo.data.qpos.copy()
+        scene = mujoco.MjvScene(demo.model, maxgeom=32)
+        draw_guidance(scene, demo.data.xpos[demo.payload], [16, 0, 0, 0, 0, 1], 2., "admittance")
+        self.assertGreater(scene.ngeom, 2)
+        np.testing.assert_allclose(demo.data.qpos, qpos_before)
         np.testing.assert_allclose(demo.data.xfrc_applied, 0)
 
     def test_motion_ramp_braking_and_slew(self):

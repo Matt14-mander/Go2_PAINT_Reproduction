@@ -41,7 +41,62 @@ Teacher 观测为机械臂8帧干净历史（相对角度6、速度6、上一控
 
 ## 服务器运行
 
-### 桌面演示：主动搬运8米（推荐）
+### PAINT 方向的桌面演示：向载荷施力，机器人跟随（推荐）
+
+目标依据 [PAINT 主页 Simulation Results](https://paint-bot.github.io/) 与[论文的物体交互和多机部分](https://arxiv.org/html/2604.12852v2)：伙伴通过载荷交互表达运动意图，机器人通过机械耦合响应。前一版 `--drive velocity` 是独立的速度控制接口检查，不能作为这个受力跟随目标的替代。
+
+新增 `--controller admittance --drive wrench --wrench-source grasp` 链路：
+
+```text
+键盘修改世界坐标 Fx/Fy/Tz
+  → 真实外力/力矩只施加到共享箱体
+  → 固定连接把物体运动/受力传到各机械臂
+  → 每机读取自己的抓取约束反力、扣除静态偏置并低通滤波
+  → 每机独立生成底盘指令，冻结LL驱动腿部跟随
+```
+
+这个 FT 参考导纳控制器不接收统一预设速度，不读取其他机器人的位置，也不叠加原 reference 的全局队形修正。它是受力跟随 pipeline 的可替换基线，**不是 PAINT 训练出的无FT Student，也不能当作原论文性能复现**。目前 Teacher 输出饱和问题仍需解决。
+
+同步最新 `paint_cooperate.py`、`cooperative_control.py`、新增 **`cooperative_visuals.py`**，并保留之前的 `cooperative_scene.py`、`paint_loco.py/yaml`。服务器桌面执行：
+
+```bash
+conda activate limx
+cd ~/workspace/Go2_PAINT_Reproduction
+DEMO=mujoco/deploy/deploy_mujoco/go2_piper/paint_cooperate.py
+LL="$PWD/logs/rsl_rl/go2_piper_paint_loco/2026-10-24_18-05-41_train_flat_20261024_180532_13553c07/exported/policy.pt"
+
+python "$DEMO" --ll-policy "$LL" \
+  --controller admittance --drive wrench --wrench-source grasp \
+  --force-world 16 0 0 --max-speed 0.35 \
+  --settle-seconds 3 --ramp-seconds 3 \
+  --keyboard --duration 120 --camera-azimuth 25 \
+  --report logs/mujoco_coop/paint_force_follow.json
+```
+
+直接打开显示窗口，无 headless/录像。前3秒静止，最后1秒采样每机的静态抓取反力作为偏置，然后3秒逐渐向箱体施加总Fx=16N。默认导纳标度是40N对应1m/s、10Nm对应1rad/s，实际每机受力由共享物体动力学决定，不保证恰好均分。理想均分时每机约8N，对应约0.2m/s；需要更快时按W逐步增加到总24N，理想参考约0.3m/s。最大速度仍受保护范围限制，不能把理论参考当作实际走速。
+
+在桌面窗口获得焦点后：
+
+| 按键 | wrench 模式下的操作 |
+|---|---|
+| W / S | 箱体世界Fx增加 / 减少2N |
+| A / D | 箱体世界Fy增加 / 减少2N |
+| Q / E | 箱体世界Tz增加 / 减少0.5Nm |
+| X | 立即撤除请求外力/力矩，机器人减速响应由物理与控制器产生 |
+| R | 恢复命令行最初的施力请求 |
+| P | 暂停 / 继续物理仿真 |
+
+红色箭头显示实际施加的世界外力，蓝色弧形箭头显示偏航力矩；文字显示外力、力矩和实际水平位移。箭头抬高显示以避免被箱体遮挡，不参与物理计算。镜头跟随箱体但不锁死旋转，可用鼠标改变观察角度。地面每米标线帮助判断路程。终端和CSV分别记录实际外力、每机感知的抓取反力、生成指令和实际速度；在 wrench 模式下键盘只改力，不改速度。
+
+参考导纳目前使用0.25秒低通滤波、0.15m/s²平动加速度上限和静态载荷偏置扣除，机械臂保持默认姿态。若需要改变响应强度，可显式设 `--admittance-gain`；默认1，不应靠无限增益掩盖低层失稳。偏置扣除是参考控制器的工程处理，与训练时的外力观测语义不同，**不会应用到 Teacher 输入**。
+
+为隔离“反力信号适配”和“多机低层能力”，可把上述 `--wrench-source grasp` 改为 `external-share` 对照。此时参考导纳使用真实已知外力均分后的特权信号，不是每机独立感知。原有 `--controller reference --drive wrench` 仍是已知外力加全局队形辅助的基线。
+
+后续换合格 Teacher：改成 `--controller teacher --hl-policy /path/to/exported/policy.pt`，保持 `--drive wrench`。Teacher 的147维观测接口不变。用 `external-share` 先检查真值受力输入，使用 `grasp` 时仍须考虑力矩参考点和动力学分布差异。最后再接入 Student 的本体历史意图估计器，才能验证论文中的无FT感知版本。
+
+本阶段仍是同向并排GO2-PIPER和箱体代理模型；网页中的原始沙发/桌子/桶网格、相向抓取布局、粗糙地形及异构伙伴不在当前验证范围。本地已验证施力、反力方向、撤力后的参考指令衰减和箭头渲染，真实权重下的长距离/转向跟随需要在服务器实测。
+
+### 独立速度控制接口检查：主动搬运8米（非 PAINT 受力跟随展示）
 
 旧入口默认是**受力跟随**：箱体上施加8N总外力，参考控制器把它均分，换算出两台机器人各约0.1m/s的速度指令。因此物体既受到外力作用，也受到机器人腿部主动行走的作用，不能仅凭移动判断是在主动运输。
 
@@ -97,7 +152,7 @@ python "$DEMO" --ll-policy "$LL" \
 
 无需 Isaac Sim、RSL-RL，也不用停止当前训练。依赖与原 `paint_loco.py` 相同：MuJoCo3.2.7、CPU可用的PyTorch、NumPy、PyYAML；录像需要 imageio/ffmpeg。
 
-需同步：`paint_cooperate.py`、`cooperative_scene.py`、`cooperative_control.py`、原有 `paint_loco.py/paint_loco.yaml`，以及整个 `mujoco/robots/go2_piper/` 的真实网格。没有新增需要下载的机器人资产。
+需同步：`paint_cooperate.py`、`cooperative_scene.py`、`cooperative_control.py`、`cooperative_visuals.py`、原有 `paint_loco.py/paint_loco.yaml`，以及整个 `mujoco/robots/go2_piper/` 的真实网格。没有新增需要下载的机器人资产。
 
 ```bash
 conda activate limx

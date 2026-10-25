@@ -20,7 +20,8 @@ import torch
 import yaml
 
 from cooperative_scene import build_scene, initialize_scene
-from cooperative_control import DesktopCommand, motion_profile, slew_command, velocity_target
+from cooperative_control import DesktopCommand, WrenchFollower, motion_profile, slew_command, velocity_target
+from cooperative_visuals import draw_guidance
 from paint_loco import JOINT_NAMES, MUJOCO_ROOT, PaintBridge, named_id
 
 
@@ -152,8 +153,11 @@ class CooperativeDemo:
                 self.model.geom_conaffinity[geom] = all_bits ^ bit
         mujoco.mj_forward(self.model, self.data)
 
+    def observed_world_wrench(self, robot, external_world, source):
+        return external_world / len(self.robots) if source == "external-share" else grasp_reaction(self.model, self.data, robot.eq, self.payload)
+
     def normalized_wrench(self, robot, external_world, source):
-        wrench = external_world / len(self.robots) if source == "external-share" else grasp_reaction(self.model, self.data, robot.eq, self.payload)
+        wrench = self.observed_world_wrench(robot, external_world, source)
         rotation = self.data.xmat[robot.base].reshape(3, 3)
         force, torque = rotation.T @ wrench[:3], rotation.T @ wrench[3:]
         return np.clip([force[0] / 40., force[1] / 40., torque[2] / 10.], -1, 1).astype(np.float32)
@@ -208,11 +212,12 @@ def main():
     parser.add_argument("--config", type=Path, default=Path(__file__).with_name("paint_loco.yaml"))
     parser.add_argument("--ll-policy", type=Path, nargs="+", required=True)
     parser.add_argument("--hl-policy", type=Path, nargs="+", default=[])
-    parser.add_argument("--controller", choices=("reference", "teacher"), default="reference")
+    parser.add_argument("--controller", choices=("reference", "admittance", "teacher"), default="reference")
+    parser.add_argument("--admittance-gain", type=float, default=1.)
     parser.add_argument("--drive", choices=("wrench", "velocity"), default="wrench")
     parser.add_argument("--command-world", nargs=3, type=float, default=[.3, 0., 0.], metavar=("VX", "VY", "WZ"))
     parser.add_argument("--travel-distance", type=float, help="Optional straight-line goal distance in meters; holds near goal")
-    parser.add_argument("--keyboard", action="store_true", help="Reference velocity mode: W/S A/D Q/E, X stop, R resume, P pause")
+    parser.add_argument("--keyboard", action="store_true", help="Wrench drive: keyboard changes PAYLOAD FORCE; velocity drive: changes speed")
     parser.add_argument("--settle-seconds", type=float, default=2.)
     parser.add_argument("--ramp-seconds", type=float, default=3.)
     parser.add_argument("--wrench-source", choices=("external-share", "grasp"), default="external-share")
@@ -237,7 +242,7 @@ def main():
     if args.force_world is None:
         args.force_world = [8., 0., 0.] if args.drive == "wrench" else [0., 0., 0.]
     numbers = [args.spacing, args.payload_mass, args.duration, args.max_speed, args.max_yaw_rate,
-               args.formation_gain, args.camera_azimuth, args.settle_seconds, args.ramp_seconds,
+               args.formation_gain, args.camera_azimuth, args.settle_seconds, args.ramp_seconds, args.admittance_gain,
                *args.force_world, *args.command_world]
     if args.travel_distance is not None:
         numbers.append(args.travel_distance)
@@ -247,14 +252,16 @@ def main():
         parser.error("Expected duration/fps > 0, speed in (0,1], yaw rate in (0,1.5], formation gain >= 0")
     if args.controller == "teacher" and not args.hl_policy:
         parser.error("teacher mode requires exported 147->9 --hl-policy")
-    if args.controller == "reference" and args.hl_policy:
+    if args.controller != "teacher" and args.hl_policy:
         parser.error("Use --controller teacher to enable --hl-policy")
     if args.settle_seconds < 0 or args.ramp_seconds <= 0 or args.viewer_fps < 1:
         parser.error("Expected settle >= 0, ramp > 0, viewer fps > 0")
     if args.drive == "velocity" and args.controller != "reference":
         parser.error("Velocity drive is a reference-controller demo; Teacher uses wrench drive")
-    if args.keyboard and (args.headless or args.drive != "velocity"):
-        parser.error("Keyboard requires desktop reference velocity mode")
+    if args.keyboard and args.headless:
+        parser.error("Keyboard requires a desktop viewer")
+    if args.admittance_gain <= 0 or (args.controller == "admittance" and args.settle_seconds < 1):
+        parser.error("Admittance gain must be positive; reaction calibration needs settle >= 1 second")
     if args.travel_distance is not None and (args.travel_distance <= 0 or args.drive != "velocity" or args.keyboard
                                               or np.linalg.norm(args.command_world[:2]) == 0 or args.command_world[2] != 0):
         parser.error("Distance goal requires velocity drive, nonzero translation, zero yaw, no keyboard")
@@ -275,16 +282,20 @@ def main():
         print(f"[COOP] Initial status: {json.dumps(demo.status())}", flush=True)
         return 0
     model, data = demo.model, demo.data
-    desktop = DesktopCommand(args.command_world, args.max_speed, args.max_yaw_rate)
+    desktop = (DesktopCommand(args.command_world, args.max_speed, args.max_yaw_rate) if args.drive == "velocity"
+               else DesktopCommand(args.force_world, 80., 10., linear_step=2., yaw_step=.5, label="payload Fx/Fy/Tz [N,N,Nm]"))
+    followers = [WrenchFollower(args.admittance_gain) for _ in demo.robots]
     if args.headless:
         context = nullcontext(None)
     else:
         from mujoco import viewer
         context = viewer.launch_passive(model, data, key_callback=desktop.on_key if args.keyboard else None)
     if args.keyboard:
-        print("[COOP] Click viewer: W/S forward/back, A/D left/right, Q/E yaw, X stop, R resume, P pause", flush=True)
-    print(f"[COOP] drive={args.drive}; force_world={args.force_world}; world_command={args.command_world}; "
-          f"distance_goal={args.travel_distance}", flush=True)
+        units = "payload Fx/Fy +/-2N, Tz +/-0.5Nm" if args.drive == "wrench" else "world velocity +/-0.05m/s, yaw +/-0.1rad/s"
+        print(f"[COOP] Keyboard changes {units}: W/S X-axis, A/D Y-axis, Q/E yaw, X zero, R restore, P pause", flush=True)
+    drive_description = (f"payload force Fx/Fy/Tz={args.force_world}; no prescribed transport velocity"
+                         if args.drive == "wrench" else f"world velocity={args.command_world}; distance_goal={args.travel_distance}")
+    print(f"[COOP] drive={args.drive}; {drive_description}", flush=True)
     path = args.report or MUJOCO_ROOT.parent / f"logs/mujoco_coop/coop_{datetime.now():%Y%m%d_%H%M%S_%f}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     trace_path = path.with_suffix(".csv")
@@ -315,7 +326,10 @@ def main():
                     display.cam.distance, display.cam.azimuth, display.cam.elevation = camera.distance, camera.azimuth, camera.elevation
             trace = csv.writer(stream)
             trace.writerow(["time_s", "robot", "reference_cx", "reference_cy", "reference_cz", "raw_vx", "raw_vy", "raw_wz",
-                            "command_vx", "command_vy", "command_wz", "actual_vx", "actual_vy", "actual_wz", "tilt_deg", "grasp_error_m"])
+                            "command_vx", "command_vy", "command_wz", "actual_vx", "actual_vy", "actual_wz", "tilt_deg", "grasp_error_m",
+                            "payload_external_Fx", "payload_external_Fy", "payload_external_Tz",
+                            "input_wrench_world_Fx", "input_wrench_world_Fy", "input_wrench_world_Fz",
+                            "input_wrench_world_Tx", "input_wrench_world_Ty", "input_wrench_world_Tz"])
             step = 0
             while step < int(round(args.duration / model.opt.timestep)):
                 wall = time.monotonic()
@@ -328,7 +342,8 @@ def main():
                     time.sleep(.01)
                     continue
                 external[:] = 0
-                external[[0, 1, 5]] = np.asarray(args.force_world) * motion_profile(
+                force_request = requested if args.drive == "wrench" else np.asarray(args.force_world)
+                external[[0, 1, 5]] = force_request * motion_profile(
                     data.time, args.duration, args.settle_seconds, args.ramp_seconds)
                 data.xfrc_applied[:] = 0
                 data.xfrc_applied[demo.payload] = external
@@ -354,10 +369,20 @@ def main():
                         if controls:
                             robot.push_history()
                         reference = demo.normalized_wrench(robot, external, args.wrench_source)
-                        raw = highs[index](robot.teacher_observation(reference)) if highs else demo.reference_action(
-                            index, external, args.formation_gain, args.max_speed, args.max_yaw_rate,
-                            group_command if args.drive == "velocity" else None,
-                            heading_target if args.drive == "velocity" else None)
+                        observed = demo.observed_world_wrench(robot, external, args.wrench_source)
+                        if highs:
+                            raw = highs[index](robot.teacher_observation(reference))
+                        elif args.controller == "admittance":
+                            calibrating = data.time < args.settle_seconds
+                            # Ignore early landing transients; calibrate final stationary second.
+                            bias_window = data.time >= args.settle_seconds - 1
+                            velocity = followers[index].update(observed, data.xmat[robot.base].reshape(3, 3),
+                                                                4 * model.opt.timestep, calibrating, bias_window)
+                            raw = np.r_[velocity, np.zeros(6)]
+                        else:
+                            raw = demo.reference_action(index, external, args.formation_gain, args.max_speed, args.max_yaw_rate,
+                                                        group_command if args.drive == "velocity" else None,
+                                                        heading_target if args.drive == "velocity" else None)
                         limits = np.array([args.max_speed, args.max_speed, args.max_yaw_rate])
                         clipped[index] += int(np.any(np.abs(raw[:3]) > limits + 1e-6))
                         robot.command = np.clip(raw[:3], -limits, limits)
@@ -366,13 +391,15 @@ def main():
                         robot.set_transport_action(leg, raw[3:])
                         state = final_status[index]
                         trace.writerow([float(data.time), index, *reference, *raw[:3], *robot.command,
-                                        *state["actual_vx_vy_wz"], state["tilt_deg"], state["grasp_error_m"]])
+                                        *state["actual_vx_vy_wz"], state["tilt_deg"], state["grasp_error_m"],
+                                        *external[[0, 1, 5]], *observed])
                     controls += 1
                     if controls == 1 or controls % 50 == 0:
                         displacement = data.xpos[demo.payload] - initial_payload
                         mean_actual = np.mean([s["actual_vx_vy_wz"] for s in final_status], axis=0)
                         print(f"[COOP] t={data.time:.2f}s payload={data.xpos[demo.payload].round(3)} "
-                              f"travel_xy={np.linalg.norm(displacement[:2]):.2f}m world_cmd={group_command.round(2)} "
+                              f"travel_xy={np.linalg.norm(displacement[:2]):.2f}m Fxy/Tz={external[[0,1,5]].round(1)} "
+                              f"cmd_body={np.mean([r.command for r in demo.robots], axis=0).round(2)} "
                               f"actual_body={mean_actual.round(2)} tilt={peak_tilt.round(1)} grasp={peak_grasp.round(4)}", flush=True)
                 for robot in demo.robots:
                     robot.write_torques()
@@ -385,12 +412,17 @@ def main():
                 camera.lookat[:] = data.xpos[demo.payload]
                 if renderer is not None and data.time >= next_frame:
                     renderer.update_scene(data, camera=camera)
+                    draw_guidance(renderer.scene, data.xpos[demo.payload], external,
+                                  np.linalg.norm((data.xpos[demo.payload] - initial_payload)[:2]), args.controller)
                     writer.append_data(renderer.render())
                     next_frame += 1 / args.fps
                 if display is not None:
                     if data.time >= next_gui:
                         with display.lock():
                             display.cam.lookat[:] = camera.lookat
+                            display.user_scn.ngeom = 0
+                            draw_guidance(display.user_scn, data.xpos[demo.payload], external,
+                                          np.linalg.norm((data.xpos[demo.payload] - initial_payload)[:2]), args.controller)
                         display.sync()
                         next_gui = data.time + 1 / args.viewer_fps
                     time.sleep(max(0, model.opt.timestep - (time.monotonic() - wall)))
@@ -401,8 +433,11 @@ def main():
             renderer.close()
     mujoco.mj_forward(model, data)
     report = {"reason": reason, "controller": args.controller, "robots": args.num_robots, "payload_mass_kg": args.payload_mass,
-              "drive": args.drive, "command_world_vx_vy_wz": args.command_world,
-              "final_requested_world_command": desktop.snapshot()[0].tolist(),
+              "drive": args.drive, "command_world_vx_vy_wz": args.command_world if args.drive == "velocity" else None,
+              "final_keyboard_request": desktop.snapshot()[0].tolist(),
+              "keyboard_request_units": "N,N,Nm" if args.drive == "wrench" else "m/s,m/s,rad/s",
+              "admittance_gain": args.admittance_gain,
+              "follower_bias_world": [f.bias.tolist() for f in followers] if args.controller == "admittance" else None,
               "travel_distance_goal_m": args.travel_distance,
               "wrench_source": args.wrench_source, "force_world_Fx_Fy_Tz": args.force_world,
               "sim_time_s": float(data.time), "wall_time_s": time.monotonic() - started, "control_steps": controls,

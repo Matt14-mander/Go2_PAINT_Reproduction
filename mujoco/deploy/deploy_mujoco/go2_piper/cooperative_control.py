@@ -40,11 +40,12 @@ def slew_command(current, target, dt, acceleration=.15, yaw_acceleration=.4):
 
 class DesktopCommand:
     """MuJoCo key_callback writes commands; physics thread reads snapshots."""
-    def __init__(self, command, max_speed, max_yaw):
+    def __init__(self, command, max_speed, max_yaw, linear_step=.05, yaw_step=.1, label="world command"):
         self.original = np.asarray(command, float).copy()
         self.command = self.original.copy()
         self.max_speed, self.max_yaw = max_speed, max_yaw
         self.paused = False
+        self.linear_step, self.yaw_step, self.label = linear_step, yaw_step, label
         self.lock = Lock()
 
     def on_key(self, key):
@@ -56,17 +57,50 @@ class DesktopCommand:
             elif key == ord("R"):
                 self.command[:] = self.original
             elif key in (ord("W"), ord("S")):
-                self.command[0] += .05 if key == ord("W") else -.05
+                self.command[0] += self.linear_step if key == ord("W") else -self.linear_step
             elif key in (ord("A"), ord("D")):
-                self.command[1] += .05 if key == ord("A") else -.05
+                self.command[1] += self.linear_step if key == ord("A") else -self.linear_step
             elif key in (ord("Q"), ord("E")):
-                self.command[2] += .1 if key == ord("Q") else -.1
+                self.command[2] += self.yaw_step if key == ord("Q") else -self.yaw_step
             else:
                 return
             self.command[:2] = np.clip(self.command[:2], -self.max_speed, self.max_speed)
             self.command[2] = np.clip(self.command[2], -self.max_yaw, self.max_yaw)
-            print(f"[KEY] world command={self.command.round(2)}; paused={self.paused}", flush=True)
+            print(f"[KEY] {self.label}={self.command.round(2)}; paused={self.paused}", flush=True)
 
     def snapshot(self):
         with self.lock:
             return self.command.copy(), self.paused
+
+
+class WrenchFollower:
+    """Reference FT-based admittance, not the PAINT learned intent estimator.
+
+    Each robot only receives its own world grasp reaction and base rotation.
+    Calibrate stationary load bias before external guidance, low-pass the wrench,
+    then produce a speed request. No common velocity or formation state is read.
+    """
+    def __init__(self, gain=1., time_constant=.25):
+        self.gain, self.time_constant = gain, time_constant
+        self.bias = np.zeros(6)
+        self.bias_samples = 0
+        self.filtered = np.zeros(3)
+        self.command = np.zeros(3)
+
+    def update(self, world_wrench, base_rotation, dt, calibrating=False, gain_bias=True):
+        world_wrench = np.asarray(world_wrench, float)
+        if calibrating:
+            if gain_bias:
+                self.bias_samples += 1
+                self.bias += (world_wrench - self.bias) / self.bias_samples
+            self.filtered[:] = 0
+            self.command[:] = 0
+            return self.command.copy()
+        corrected = world_wrench - self.bias
+        force = np.asarray(base_rotation).T @ corrected[:3]
+        torque = np.asarray(base_rotation).T @ corrected[3:]
+        normalized = np.array([force[0] / 40., force[1] / 40., torque[2] / 10.])
+        alpha = 1 - np.exp(-dt / self.time_constant)
+        self.filtered += alpha * (normalized - self.filtered)
+        self.command = slew_command(self.command, self.filtered * self.gain, dt)
+        return self.command.copy()

@@ -122,6 +122,39 @@ python scripts/rsl_rl/train.py \
 
 ## 本地验证范围
 
+### 已训练 Teacher 的侧翻排查
+
+`scripts/rsl_rl/play.py` 现在为 Transport 输出专用 JSON，保存到 checkpoint 同目录的 `evaluations/`，视频仍在 `videos/play/`。测试仍使用已训练 teacher，而非 smoke 的参考控制器。
+
+若出现侧翻，先固定 checkpoint、seed、载荷，比较 `wrench_scale=0,0.05,0.1,0.2`，增加 `--no-domain-randomization --payload-mass 0.5`。这个选项会固定根部/关节初始状态，取消质量/摩擦随机化和执行器延迟；独立箱体质量仍由 `--payload-mass` 指定，受力仍保留。额外周期扰动用 `env.periodic_disturbance=false` 明确关闭。
+
+```bash
+RUN="$PWD/logs/rsl_rl/go2_piper_paint_transport_teacher/2026-10-25_15-29-21_teacher_flat_light"
+PYTHONPATH="$PWD/.runtime/rsl_rl_3_0_1${PYTHONPATH:+:$PYTHONPATH}" \
+python scripts/rsl_rl/play.py \
+  --task GO2-PIPER-PAINT-Transport-Flat --checkpoint "$RUN/model_8600.pt" \
+  --device cuda:0 --num_envs 4 --seed 42 --headless --video --video_length 1500 \
+  --no-domain-randomization --payload-mass 0.5 --eval-name teacher8600_nominal_01 \
+  "env.ll_policy_path=$POLICY" env.observation_mode=teacher \
+  env.wrench_scale=0.1 env.periodic_disturbance=false
+```
+
+优先读取这些指标：
+
+| 指标 | 含义 |
+|---|---|
+| `non_timeout_resets` | 非超时终止次数；当前环境只有 base contact 终止，接触箱体等也可能触发，不能直接等同于所有侧翻次数 |
+| `max_tilt_deg` / `max_abs_roll_deg` | 控制步采样的最大倾角/绝对滚转角；自动重置可能使最终倒地帧未被采到 |
+| `tilt_over_45_sample_fraction` | 倾角超过45度的有效样本比例 |
+| `teacher_command_rmse_vs_reference` | 新 teacher 速度指令相对当前归一化 wrench 参考的 RMSE |
+| `velocity_rmse_vs_reference` | 当前实际速度相对当前参考的 RMSE，含响应延迟与动力学误差 |
+| `arm_target_tracking_rmse_rad` | 实际机械臂关节相对上一控制步目标的 RMSE |
+| `arm_posture_deviation_rmse_rad` | 实际机械臂关节相对默认姿态的 RMSE |
+
+平均受力和速度可能因正负方向抵消，不能单看均值判断跟随成功。零力也侧翻时优先检查 teacher 的零力指令、机械臂目标与碰撞；仅随机化场景侧翻时逐项恢复初始速度、摩擦、增重和延迟；随 wrench 增大而失稳时先降低课程强度。若 teacher 指令误差小、实际运动误差仍大，应继续排查低层负载能力、机械臂姿态及载荷约束。暂时不进入 student 蒸馏或 Rough 扩展，也不要仅凭一次30秒视频认定整体稳定。
+
+所有统计来自重置前的控制步状态，跳过 episode 第0步；没有捕获所有物理子步的峰值。当前训练进程无需因评估代码更新而重启，评估应使用新进程。
+
 ```bash
 python scripts/paint/check_transport_math.py
 # 需要独立测试环境的 torch / usd-core；不要为此改动 limx 的 USD 安装

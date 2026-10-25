@@ -38,6 +38,31 @@ def arguments(**kwargs):
 
 
 class EvaluationTests(unittest.TestCase):
+    def test_transport_nominal_preserves_teacher_schema_and_interaction(self):
+        cfg = configuration()
+        cfg.wrench_scale, cfg.periodic_disturbance = .2, True
+        cfg.events.payload_material = "material"
+        cfg.scene = NS(robot=NS(actuators={"arm": NS(min_delay=0, max_delay=4)}))
+        before = copy.deepcopy(cfg.observations)
+        module.configure_evaluation(cfg, arguments(task="GO2-PIPER-PAINT-Transport-Flat",
+                                                  payload_mass=.5, no_domain_randomization=True))
+        self.assertEqual(cfg.wrench_scale, .2)
+        self.assertTrue(cfg.periodic_disturbance)
+        self.assertIsNone(cfg.events.payload_material)
+        self.assertEqual(cfg.scene.robot.actuators["arm"].max_delay, 0)
+        self.assertEqual(cfg.events.reset_base.params["pose_range"]["x"], (0, 0))
+        self.assertEqual(cfg.events.payload_mass.params["mass_range"], (.5, .5))
+        self.assertEqual(cfg.observations, before)
+
+    def test_transport_zero_wrench_and_fixed_base_command_rejection(self):
+        cfg = configuration()
+        cfg.wrench_scale, cfg.periodic_disturbance = .2, True
+        module.configure_evaluation(cfg, arguments(task="GO2-PIPER-PAINT-Transport-Flat", no_disturbances=True))
+        self.assertEqual(cfg.wrench_scale, 0)
+        self.assertFalse(cfg.periodic_disturbance)
+        with self.assertRaises(ValueError):
+            module.configure_evaluation(cfg, arguments(task="GO2-PIPER-PAINT-Transport-Flat", base_command=[0, 0, 0]))
+
     def test_default_keeps_random_evaluation(self):
         cfg = configuration()
         before = copy.deepcopy(cfg)

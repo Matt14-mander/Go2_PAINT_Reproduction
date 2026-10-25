@@ -19,7 +19,7 @@ class LocoEvalMetrics:
         self.timeouts = 0
         self.has_timeouts = False
 
-    def sample(self):
+    def sample(self, actions=None):
         data = self.robot.data
         velocity = torch.cat((data.root_lin_vel_b[:, :2], data.root_ang_vel_b[:, 2:3]), dim=-1)
         command = self.env.command_manager.get_command("base_velocity")[:, :3]
@@ -50,3 +50,76 @@ class LocoEvalMetrics:
                 "episode_resets": self.resets,
                 "time_limit_resets": self.timeouts if self.has_timeouts else None,
                 "non_timeout_resets": self.resets - self.timeouts if self.has_timeouts else None}
+
+
+class TransportEvalMetrics:
+    """Pre-step diagnostics; terminal counters include events hidden by auto-reset.
+
+    Teacher-command error measures intent mapping; velocity error additionally
+    contains dynamics/LL tracking. Exclude the instantaneous reset state.
+    """
+
+    def __init__(self, env):
+        self.env = env
+        self.action = env.action_manager.get_term("transport")
+        self.sums = torch.zeros(5, 3, device=env.device)
+        self.arm_squared = torch.zeros(2, device=env.device)
+        self.max_tilt = torch.zeros((), device=env.device)
+        self.max_roll = torch.zeros((), device=env.device)
+        self.tilt_over_45 = 0
+        self.count = self.resets = self.timeouts = 0
+        self.has_timeouts = False
+
+    def sample(self, actions=None):
+        action = self.action
+        data = action.robot.data
+        mask = self.env.episode_length_buf > 0
+        n = int(mask.sum())
+        if not n:
+            return
+        reference = action.reference()[mask]
+        # Inspect the new deterministic teacher command at the observed state.
+        command = action.base_command if actions is None else actions[:, :3]
+        limits = command.new_tensor([1., 1., 1.5])
+        command = command.clamp(-limits, limits)
+        command = torch.where(command.abs() < action.cfg.command_deadband, 0., command)[mask]
+        velocity = torch.cat((data.root_lin_vel_b[:, :2], data.root_ang_vel_b[:, 2:3]), dim=-1)[mask]
+        for index, values in enumerate((reference, command, velocity,
+                                         (command - reference).square(), (velocity - reference).square())):
+            self.sums[index] += values.sum(0)
+        q = data.joint_pos[mask][:, action.arm_ids]
+        self.arm_squared[0] += (q - action.arm_target[mask]).square().mean(-1).sum()
+        self.arm_squared[1] += (q - data.default_joint_pos[mask][:, action.arm_ids]).square().mean(-1).sum()
+        gravity = data.projected_gravity_b[mask]
+        tilt = torch.acos((-gravity[:, 2]).clamp(-1., 1.))
+        roll = torch.atan2(-gravity[:, 1], -gravity[:, 2]).abs()
+        self.max_tilt = torch.maximum(self.max_tilt, tilt.max())
+        self.max_roll = torch.maximum(self.max_roll, roll.max())
+        self.tilt_over_45 += int((tilt > torch.pi / 4).sum())
+        self.count += n
+
+    def record_resets(self, dones, extras):
+        self.resets += int(dones.count_nonzero())
+        if "time_outs" in extras:
+            self.has_timeouts = True
+            self.timeouts += int(extras["time_outs"].count_nonzero())
+
+    def summary(self):
+        result = {"samples": self.count, "episode_resets": self.resets,
+                  "time_limit_resets": self.timeouts if self.has_timeouts else None,
+                  "non_timeout_resets": self.resets - self.timeouts if self.has_timeouts else None,
+                  "ll_sha256": self.action.ll_sha256,
+                  "sampling": "pre_step_excluding_reset_states; tilt maxima may miss the terminal physics step"}
+        if self.count:
+            values = self.sums / self.count
+            result.update(mean_reference_vx_vy_wz=values[0].tolist(),
+                          mean_teacher_command_vx_vy_wz=values[1].tolist(),
+                          mean_actual_vx_vy_wz=values[2].tolist(),
+                          teacher_command_rmse_vs_reference=values[3].sqrt().tolist(),
+                          velocity_rmse_vs_reference=values[4].sqrt().tolist(),
+                          arm_target_tracking_rmse_rad=float((self.arm_squared[0] / self.count).sqrt()),
+                          arm_posture_deviation_rmse_rad=float((self.arm_squared[1] / self.count).sqrt()),
+                          max_tilt_deg=float(torch.rad2deg(self.max_tilt)),
+                          max_abs_roll_deg=float(torch.rad2deg(self.max_roll)),
+                          tilt_over_45_sample_fraction=self.tilt_over_45 / self.count)
+        return result

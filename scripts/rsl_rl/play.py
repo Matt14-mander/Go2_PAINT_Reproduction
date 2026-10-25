@@ -79,7 +79,7 @@ import time
 import json
 from datetime import datetime
 
-from eval_metrics import LocoEvalMetrics
+from eval_metrics import LocoEvalMetrics, TransportEvalMetrics
 
 import gymnasium as gym
 import torch
@@ -230,6 +230,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     obs = env.get_observations()
     timestep = 0
     metrics = LocoEvalMetrics(env.unwrapped) if "GO2-PIPER-PAINT-Loco-" in args_cli.task else None
+    if "GO2-PIPER-PAINT-Transport-" in args_cli.task:
+        metrics = TransportEvalMetrics(env.unwrapped)
     rollout_start = time.monotonic()
     # simulate environment
     while simulation_app.is_running():
@@ -239,7 +241,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # agent stepping
             actions = policy(obs)
             if metrics is not None:
-                metrics.sample()
+                metrics.sample(actions)
             # print(obs["policy"])
             # env stepping
             obs, _, dones, extras = env.step(actions)
@@ -273,6 +275,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                       fixed_command=args_cli.base_command, additional_payload_kg=args_cli.payload_mass,
                       no_disturbances=args_cli.no_disturbances,
                       nominal_physics=args_cli.no_domain_randomization)
+        if isinstance(metrics, TransportEvalMetrics):
+            report.update(wrench_scale=env_cfg.wrench_scale, periodic_disturbance=env_cfg.periodic_disturbance,
+                          payload_mass_range=list(env_cfg.events.payload_mass.params["mass_range"]))
+            report.pop("additional_payload_kg", None)
         directory = os.path.join(log_dir, "evaluations")
         os.makedirs(directory, exist_ok=True)
         path = os.path.join(directory, evaluation_name + ".json")

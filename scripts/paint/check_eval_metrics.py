@@ -14,6 +14,30 @@ spec.loader.exec_module(module)
 
 
 class MetricsTests(unittest.TestCase):
+    def test_transport_separates_teacher_mapping_from_motion_and_records_falls(self):
+        data = NS(root_lin_vel_b=torch.tensor([[.1, 0., 0.], [99., 0., 0.]]),
+                  root_ang_vel_b=torch.zeros(2, 3), joint_pos=torch.full((2, 6), .2),
+                  default_joint_pos=torch.zeros(2, 6),
+                  projected_gravity_b=torch.tensor([[0., -.8660254, -.5], [0., 0., -1.]]))
+        action = NS(robot=NS(data=data), arm_ids=list(range(6)), arm_target=torch.full((2, 6), .1),
+                    reference=lambda: torch.tensor([[.2, 0., 0.], [0., 0., 0.]]),
+                    ll_sha256="frozen-test", cfg=NS(command_deadband=.05))
+        env = NS(action_manager=NS(get_term=lambda _: action), device="cpu", episode_length_buf=torch.tensor([2, 0]))
+        metric = module.TransportEvalMetrics(env)
+        metric.sample(torch.tensor([[.2, 0., 0.], [99., 0., 0.]]))
+        metric.record_resets(torch.tensor([True, False]), {"time_outs": torch.tensor([False, False])})
+        metric.record_resets(torch.tensor([False, True]), {"time_outs": torch.tensor([False, True])})
+        result = metric.summary()
+        self.assertEqual(result["samples"], 1)  # reset state's fake velocity is excluded
+        self.assertAlmostEqual(result["teacher_command_rmse_vs_reference"][0], 0.)
+        self.assertAlmostEqual(result["velocity_rmse_vs_reference"][0], .1, places=6)
+        self.assertAlmostEqual(result["arm_target_tracking_rmse_rad"], .1, places=6)
+        self.assertAlmostEqual(result["max_tilt_deg"], 60., places=4)
+        self.assertAlmostEqual(result["max_abs_roll_deg"], 60., places=4)
+        self.assertEqual(result["tilt_over_45_sample_fraction"], 1)
+        self.assertEqual(result["non_timeout_resets"], 1)
+        self.assertEqual(result["time_limit_resets"], 1)
+
     def test_tracking_arm_error_and_resets_are_distinct(self):
         data = NS(root_lin_vel_b=torch.tensor([[0.2, 0.0, 0.0]]),
                   root_ang_vel_b=torch.tensor([[0.0, 0.0, 0.1]]),

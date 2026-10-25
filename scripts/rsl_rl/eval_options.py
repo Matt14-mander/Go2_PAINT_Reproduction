@@ -8,7 +8,7 @@ def add_eval_args(parser):
     parser.add_argument("--base-command", nargs=3, type=float, metavar=("VX", "VY", "WZ"),
                         help="Fixed body-frame velocity command instead of random commands")
     parser.add_argument("--no-disturbances", action="store_true", help="Disable pushes and payload wrenches")
-    parser.add_argument("--payload-mass", type=float, help="Fixed additional lumped payload mass in kg")
+    parser.add_argument("--payload-mass", type=float, help="Fixed payload kg (additional EE mass for Loco; box mass for Transport)")
     parser.add_argument("--no-domain-randomization", action="store_true",
                         help="Nominal physical parameters and repeatable initial pose")
     parser.add_argument("--eval-name", default="play", help="Safe label for video and evaluation summary")
@@ -24,8 +24,11 @@ def configure_evaluation(cfg, args):
         raise ValueError("--eval-name must contain only letters, digits, '_' or '-'")
     if not any((command is not None, mass is not None, no_disturbances, nominal)):
         return
-    if "GO2-PIPER-PAINT-Loco-" not in args.task:
-        raise ValueError("Controlled evaluation options currently require a GO2-PIPER-PAINT-Loco task")
+    transport = "GO2-PIPER-PAINT-Transport-" in args.task
+    if not transport and "GO2-PIPER-PAINT-Loco-" not in args.task:
+        raise ValueError("Controlled evaluation options require a GO2-PIPER-PAINT Loco or Transport task")
+    if transport and command is not None:
+        raise ValueError("Transport velocity commands must come from the teacher; do not pass --base-command")
     if command is not None:
         if len(command) != 3 or any(not math.isfinite(value) for value in command):
             raise ValueError("--base-command requires three finite values")
@@ -49,10 +52,19 @@ def configure_evaluation(cfg, args):
         for key in ("push_robot", "payload_wrench_reset", "payload_wrench_interval", "base_external_force_torque"):
             if hasattr(cfg.events, key):
                 setattr(cfg.events, key, None)
+        if transport:
+            cfg.wrench_scale = 0.0
+            cfg.periodic_disturbance = False
     if nominal:
         for key in ("physics_material", "add_mass", "base_com", "randomize_rigid_body_inertia", "randomize_actuator_gains"):
             if hasattr(cfg.events, key):
                 setattr(cfg.events, key, None)
+        if transport:
+            cfg.events.payload_material = None
+            # This option isolates physics/initial-state randomness. Preserve
+            # wrench_scale and periodic_disturbance unless explicitly overridden.
+            for actuator in cfg.scene.robot.actuators.values():
+                actuator.min_delay = actuator.max_delay = 0
         for key in ("reset_robot_joints", "reset_arm_joints"):
             term = getattr(cfg.events, key, None)
             if term is not None:
@@ -63,5 +75,6 @@ def configure_evaluation(cfg, args):
             if key in reset.params:
                 reset.params[key] = {axis: (0.0, 0.0) for axis in reset.params[key]}
         cfg.observations.policy.enable_corruption = False
-    print(f"[EVAL] command={command}; additional payload={mass} kg; "
+    mass_label = "box mass" if transport else "additional payload"
+    print(f"[EVAL] command={command}; {mass_label}={mass} kg; "
           f"disturbances={'off' if no_disturbances else 'on'}; nominal_physics={nominal}", flush=True)

@@ -7,11 +7,15 @@ gym.make. This checks import isolation, not simulation or checkpoint weights.
 import ast
 import builtins
 import os
+import hashlib
+import json
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
+from packaging import version
 
 SOURCE = Path(__file__).resolve().parents[1] / "rsl_rl/play.py"
 TREE = ast.parse(SOURCE.read_text(encoding="utf-8"))
@@ -28,6 +32,40 @@ class StopBeforeSimulation(Exception):
 
 
 class CheckpointTests(unittest.TestCase):
+    def test_export_only_has_checkpoint_provenance_and_never_rolls_out(self):
+        context, env_cfg, agent = self.make_context()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / "model_9999.pt"
+            checkpoint.write_bytes(b"checkpoint-fixture")
+            output = root / "exported" / "model_9999"
+            context["retrieve_file_path"].return_value = str(checkpoint)
+            context["args_cli"].export_only = True
+            context["args_cli"].export_dir = str(output)
+            agent.device, agent.class_name, agent.clip_actions = "cpu", "OnPolicyRunner", None
+            agent.to_dict = lambda: {}
+            env = SimpleNamespace(unwrapped=SimpleNamespace(device="cpu"), close=Mock(),
+                                  get_observations=Mock(side_effect=AssertionError("Export must not roll out")))
+            runner = Mock()
+            runner.alg.policy = SimpleNamespace()
+            def export_jit(*args, path, filename, **kwargs):
+                Path(path).mkdir(parents=True)
+                (Path(path) / filename).write_bytes(b"actor-fixture")
+            context.update(hashlib=hashlib, json=json, version=version,
+                           DirectMARLEnv=type("DirectMARLEnv", (), {}),
+                           RslRlVecEnvWrapper=lambda raw, **kwargs: env,
+                           OnPolicyRunner=Mock(return_value=runner),
+                           export_policy_as_jit=export_jit, export_policy_as_onnx=Mock())
+            context["gym"].make = Mock(return_value=env)
+            context["main"](env_cfg, agent)
+            runner.load.assert_called_once_with(str(checkpoint))
+            env.get_observations.assert_not_called()
+            env.close.assert_called_once()
+            manifest = json.loads((output / "manifest.json").read_text())
+            self.assertEqual(Path(manifest["checkpoint"]), checkpoint)
+            self.assertEqual(manifest["checkpoint_sha256"], hashlib.sha256(b"checkpoint-fixture").hexdigest())
+            self.assertEqual(manifest["policy_sha256"], hashlib.sha256(b"actor-fixture").hexdigest())
+
     def make_context(self, checkpoint="/weights/model_9999.pt", pretrained=False):
         args = SimpleNamespace(task="GO2-PIPER-PAINT-Loco-Flat-Play", num_envs=1, device=None,
                                use_pretrained_checkpoint=pretrained, checkpoint=checkpoint, video=False, eval_name="play")

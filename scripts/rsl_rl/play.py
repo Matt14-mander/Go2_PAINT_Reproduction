@@ -35,6 +35,8 @@ from eval_options import add_eval_args, configure_evaluation
 parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
+parser.add_argument("--export-only", action="store_true", help="Load checkpoint, export actor, and exit without a rollout")
+parser.add_argument("--export-dir", type=str, help="Explicit actor export directory, e.g. exported/model_9999")
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
@@ -77,6 +79,7 @@ from packaging import version
 import os
 import time
 import json
+import hashlib
 from datetime import datetime
 
 from eval_metrics import LocoEvalMetrics, TransportEvalMetrics
@@ -198,7 +201,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     policy = runner.get_inference_policy(device=env.unwrapped.device)
 
     # export the trained policy to JIT and ONNX formats
-    export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
+    export_model_dir = (os.path.abspath(os.path.expanduser(args_cli.export_dir)) if args_cli.export_dir
+                        else os.path.join(os.path.dirname(resume_path), "exported"))
 
     if version.parse(installed_version) >= version.parse("4.0.0"):
         # use the new export functions for rsl-rl >= 4.0.0
@@ -223,8 +227,27 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.pt")
         export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
 
-    dt = env.unwrapped.step_dt
+    def sha256_file(path):
+        digest = hashlib.sha256()
+        with open(path, "rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    manifest = {"checkpoint": os.path.abspath(resume_path), "checkpoint_sha256": sha256_file(resume_path),
+                "policy_sha256": sha256_file(os.path.join(export_model_dir, "policy.pt")),
+                "task": args_cli.task, "rsl_rl_version": installed_version,
+                "exported_at": datetime.now().isoformat(),
+                "ll_policy_path": getattr(env_cfg, "ll_policy_path", None)}
+    with open(os.path.join(export_model_dir, "manifest.json"), "w", encoding="utf-8") as stream:
+        json.dump(manifest, stream, indent=2)
     print(f"[EVAL] Policy export finished: {export_model_dir}", flush=True)
+    if args_cli.export_only:
+        env.close()
+        print("[EVAL] Export-only completed; no policy rollout performed.", flush=True)
+        return
+
+    dt = env.unwrapped.step_dt
 
     # reset environment
     obs = env.get_observations()

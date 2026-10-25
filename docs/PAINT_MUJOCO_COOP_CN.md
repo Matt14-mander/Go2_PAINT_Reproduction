@@ -187,6 +187,42 @@ MUJOCO_GL=egl python "$DEMO" --ll-policy "$LL" \
 
 ## 替换 Teacher / 扩展机器人数量
 
+### 本次10000轮完成后，切换 model_9999
+
+`exported/policy.pt` 可能是之前测试8600轮时生成的文件，不能因为训练目录新增了 `model_9999.pt` 就认为它自动更新。当前 RSL-RL 3.x、无归一化的147→9 Teacher 可直接使用独立 CPU 导出器；同步 `scripts/paint/export_teacher_cpu.py` 后执行：
+
+```bash
+conda activate limx
+cd ~/workspace/Go2_PAINT_Reproduction
+RUN="$PWD/logs/rsl_rl/go2_piper_paint_transport_teacher/2026-10-25_15-29-21_teacher_flat_light"
+LL="$PWD/logs/rsl_rl/go2_piper_paint_loco/2026-10-24_18-05-41_train_flat_20261024_180532_13553c07/exported/policy.pt"
+
+python scripts/paint/export_teacher_cpu.py \
+  --checkpoint "$RUN/model_9999.pt" \
+  --output "$RUN/exported/model_9999" --activation elu
+```
+
+此入口只依赖 PyTorch 和 PyYAML，不启动 Isaac、不导入 RSL-RL，也不需要 `.runtime` 的 PYTHONPATH。它读取 `params/agent.yaml` 核对激活函数，并从 `model_state_dict` 提取原始 actor MLP，验证147维输入、9维输出和序列化前后推理等价。`--activation elu` 对应本次训练配置；配置冲突会拒绝导出。`manifest.json` 记录来源 checkpoint、checkpoint/actor SHA256、迭代编号、激活函数和归一化状态。
+
+只支持当前标准 `actor.N.weight/bias`、无观测归一化的非循环 RSL-RL 3.x Teacher。发现归一化、循环层、其他网络布局或错误维度时会报错，不能通过补零、截断或忽略状态来绕过。需要原生导出时，最新版 `play.py` 仍提供 `--export-only --export-dir`；若提示这两个参数不识别，是服务器脚本未同步，旧 parser 将未知参数传给 Hydra 导致，与权重是否有效无关。
+
+然后在服务器桌面直接用新 Teacher：
+
+```bash
+python mujoco/deploy/deploy_mujoco/go2_piper/paint_cooperate.py \
+  --ll-policy "$LL" --controller teacher \
+  --hl-policy "$RUN/exported/model_9999/policy.pt" \
+  --drive wrench --wrench-source external-share \
+  --force-world 16 0 0 --max-speed 0.25 \
+  --settle-seconds 3 --ramp-seconds 3 \
+  --keyboard --duration 60 --camera-azimuth 25 \
+  --report logs/mujoco_coop/teacher9999.json
+```
+
+先使用真实已知外力均分的 Teacher 特权输入，理想参考每机约0.2m/s；把抓取反力适配问题留给下一步独立比较。键盘 W/S、A/D、Q/E 改变箱体上的力/力矩，X撤力。该命令没有 reference/admittance 回退；速度和机械臂目标均由 Teacher 输出。JSON 中各 `hl_policies.path` 应包含 `exported/model_9999/`。
+
+10000轮完成只说明训练预算结束，不代表8600轮发现的饱和现象已解决。若原始指令仍长期顶到限幅、`command_safety_clipped_fraction` 接近1，应保留JSON和CSV继续诊断，不能仅凭视频运动认定 Teacher 已学会跟随。
+
 当前 `model_8600.pt` 已发现持续输出饱和，暂时使用 reference 模式作为 pipeline 基线。新 Teacher 评估合格并由 Isaac `play.py` 导出后，只需切换入口参数：
 
 ```bash

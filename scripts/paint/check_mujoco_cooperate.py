@@ -1,0 +1,94 @@
+"""Real MuJoCo shared-payload physics/interface checks, without trained weights."""
+
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+
+import mujoco
+import numpy as np
+import torch
+import yaml
+
+ENTRY = Path(__file__).resolve().parents[2] / "mujoco/deploy/deploy_mujoco/go2_piper"
+sys.path.insert(0, str(ENTRY))
+from paint_cooperate import CooperativeDemo, TorchActor, grasp_reaction, policy_paths  # noqa: E402
+
+
+class CooperativeChecks(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.cfg = yaml.safe_load((ENTRY / "paint_loco.yaml").read_text(encoding="utf-8"))
+        torch.set_num_threads(1)
+
+    def test_two_and_three_robot_names_grasps_and_free_payload(self):
+        for count in (2, 3):
+            demo = CooperativeDemo(self.cfg, count=count)
+            self.assertEqual(demo.model.nu, count * 18)
+            self.assertEqual(demo.model.neq, count)
+            self.assertEqual(np.count_nonzero(demo.model.jnt_type == mujoco.mjtJoint.mjJNT_FREE), count + 1)
+            for robot in demo.robots:
+                self.assertEqual(robot.observation(np.zeros(3)).shape, (247,))
+                self.assertEqual(robot.teacher_observation(np.zeros(3)).shape, (147,))
+            self.assertFalse(set(demo.robots[0].qpos_ids) & set(demo.robots[1].qpos_ids))
+            self.assertTrue(all(value["grasp_error_m"] < 1e-6 for value in demo.status()))
+            eq_rows = demo.data.efc_type == mujoco.mjtConstraint.mjCNSTR_EQUALITY
+            self.assertLess(np.max(np.abs(demo.data.efc_pos[eq_rows])), 1e-6)
+            self.assertTrue(np.all(demo.model.eq_obj1id > 0))  # no world weld
+            self.assertEqual(demo.data.ncon, 0)  # no starting handle/finger penetration
+
+    def test_independent_arm_leg_history_and_wrench_mapping(self):
+        demo = CooperativeDemo(self.cfg)
+        first, second = demo.robots
+        first.set_transport_action(np.ones(12), np.full(6, .2))
+        np.testing.assert_allclose(first.previous_action, 1)
+        np.testing.assert_allclose(second.previous_action, 0)
+        first.push_history()
+        np.testing.assert_allclose(first.history[-1, 12:], first.target[12:])
+        np.testing.assert_allclose(second.history, 0)
+        np.testing.assert_allclose(first.target[12:], np.clip(first.default[12:] + .1,
+            demo.model.jnt_range[first.joint_ids[12:]].mean(1) - np.diff(demo.model.jnt_range[first.joint_ids[12:]], axis=1).ravel() * .45,
+            demo.model.jnt_range[first.joint_ids[12:]].mean(1) + np.diff(demo.model.jnt_range[first.joint_ids[12:]], axis=1).ravel() * .45))
+        wrench = np.array([8., 0, 0, 0, 0, 2.])
+        np.testing.assert_allclose(demo.normalized_wrench(first, wrench, "external-share"), [.1, 0, .1])
+
+    def test_physical_weight_sharing_and_grasp_release(self):
+        demo = CooperativeDemo(self.cfg)
+        for _ in range(1000):
+            for robot in demo.robots:
+                robot.write_torques()
+            mujoco.mj_step(demo.model, demo.data)
+        mujoco.mj_forward(demo.model, demo.data)
+        self.assertTrue(np.isfinite(demo.data.qpos).all())
+        self.assertTrue(all(s["grasp_error_m"] < .005 for s in demo.status()))
+        reactions = np.array([grasp_reaction(demo.model, demo.data, r.eq, demo.payload) for r in demo.robots])
+        self.assertAlmostEqual(float(reactions[:, 2].sum()), -.5 * 9.81, delta=.15)
+        before = float(demo.data.xpos[demo.payload, 2])
+        demo.data.eq_active[:] = False
+        for _ in range(40):
+            for robot in demo.robots:
+                robot.write_torques()
+            mujoco.mj_step(demo.model, demo.data)
+        mujoco.mj_forward(demo.model, demo.data)
+        self.assertLess(demo.data.xpos[demo.payload, 2], before - .1)
+
+    def test_replaceable_torchscript_contract_rejects_wrong_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            layer = torch.nn.Linear(247, 12)
+            with torch.no_grad():
+                layer.weight.zero_()
+                layer.bias.zero_()
+            path = Path(directory) / "ll.pt"
+            with path.open("wb") as stream:
+                torch.jit.save(torch.jit.trace(layer, torch.zeros(1, 247)), stream)
+            policy = TorchActor(path, 247, 12)
+            np.testing.assert_allclose(policy(np.ones(247)), 0)
+            with self.assertRaises((ValueError, RuntimeError)):
+                TorchActor(path, 147, 9)
+        self.assertEqual(policy_paths(["same"], 3, "LL"), ["same"] * 3)
+        with self.assertRaises(ValueError):
+            policy_paths(["a", "b"], 3, "LL")
+
+
+if __name__ == "__main__":
+    unittest.main()

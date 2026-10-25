@@ -19,10 +19,17 @@
 import argparse
 import sys
 
+from runtime_checks import get_rsl_version_before_kit
+
+# Kit may alter sys.path and distribution discovery. Resolve metadata with the
+# user's active Python first, before importing/launching Isaac.
+installed_version = get_rsl_version_before_kit()
+
 from isaaclab.app import AppLauncher
 
 # local imports
 import cli_args  # isort: skip
+from eval_options import add_eval_args, configure_evaluation
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
@@ -43,6 +50,7 @@ parser.add_argument(
     help="Use the pre-trained checkpoint from Nucleus.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+add_eval_args(parser)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -62,16 +70,16 @@ simulation_app = app_launcher.app
 
 """Check for installed RSL-RL version."""
 
-import importlib.metadata as metadata
-
 from packaging import version
-
-installed_version = metadata.version("rsl-rl-lib")
 
 """Rest everything follows."""
 
 import os
 import time
+import json
+from datetime import datetime
+
+from eval_metrics import LocoEvalMetrics
 
 import gymnasium as gym
 import torch
@@ -119,6 +127,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    configure_evaluation(env_cfg, args_cli)
 
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
@@ -146,6 +155,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
 
     log_dir = os.path.dirname(resume_path)
+    evaluation_name = f"{args_cli.eval_name}_{datetime.now():%Y%m%d_%H%M%S_%f}"
 
     # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir
@@ -164,6 +174,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "step_trigger": lambda step: step == 0,
             "video_length": args_cli.video_length,
             "disable_logger": True,
+            "name_prefix": evaluation_name,
         }
         print("[INFO] Recording videos during training.")
         print_dict(video_kwargs, nesting=4)
@@ -181,6 +192,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
     runner.load(resume_path)
+    print(f"[EVAL] Checkpoint loaded: {resume_path}", flush=True)
 
     # obtain the trained policy for inference
     policy = runner.get_inference_policy(device=env.unwrapped.device)
@@ -212,10 +224,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
 
     dt = env.unwrapped.step_dt
+    print(f"[EVAL] Policy export finished: {export_model_dir}", flush=True)
 
     # reset environment
     obs = env.get_observations()
     timestep = 0
+    metrics = LocoEvalMetrics(env.unwrapped) if "GO2-PIPER-PAINT-Loco-" in args_cli.task else None
+    rollout_start = time.monotonic()
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
@@ -223,16 +238,23 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         with torch.inference_mode():
             # agent stepping
             actions = policy(obs)
+            if metrics is not None:
+                metrics.sample()
             # print(obs["policy"])
             # env stepping
-            obs, _, dones, _ = env.step(actions)
+            obs, _, dones, extras = env.step(actions)
+            if metrics is not None:
+                metrics.record_resets(dones, extras)
             # reset recurrent states for episodes that have terminated
             if version.parse(installed_version) >= version.parse("4.0.0"):
                 policy.reset(dones)
             else:
                 policy_nn.reset(dones)
+        timestep += 1
+        if timestep == 1 or timestep % 100 == 0:
+            print(f"[EVAL] step={timestep}; sim_time={timestep * dt:.1f}s; "
+                  f"wall_time={time.monotonic() - rollout_start:.1f}s", flush=True)
         if args_cli.video:
-            timestep += 1
             # Exit the play loop after recording one video
             if timestep == args_cli.video_length:
                 break
@@ -244,6 +266,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # close the simulator
     env.close()
+    if metrics is not None:
+        report = metrics.summary()
+        report.update(checkpoint=resume_path, steps=timestep, sim_time_s=timestep * dt,
+                      wall_time_s=time.monotonic() - rollout_start,
+                      fixed_command=args_cli.base_command, additional_payload_kg=args_cli.payload_mass,
+                      no_disturbances=args_cli.no_disturbances,
+                      nominal_physics=args_cli.no_domain_randomization)
+        directory = os.path.join(log_dir, "evaluations")
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, evaluation_name + ".json")
+        with open(path, "w", encoding="utf-8") as stream:
+            json.dump(report, stream, indent=2)
+        print(f"[EVAL] Summary: {json.dumps(report)}\n[EVAL] Saved: {path}", flush=True)
+    print(f"[EVAL] Finished after {timestep} steps; recording closed.", flush=True)
 
 
 if __name__ == "__main__":

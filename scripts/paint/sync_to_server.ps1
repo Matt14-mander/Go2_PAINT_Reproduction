@@ -27,7 +27,7 @@ $archive = Join-Path ([System.IO.Path]::GetTempPath()) ('paint-sync-' + [guid]::
 try {
     $tarArgs = @('-czf', $archive,
         '--exclude=.git', '--exclude=logs', '--exclude=runs', '--exclude=outputs',
-        '--exclude=__pycache__', '--exclude=*.pyc', '--exclude=.venv', '--exclude=venv',
+        '--exclude=__pycache__', '--exclude=*.pyc', '--exclude=.venv', '--exclude=venv', '--exclude=.runtime',
         '--exclude=.codex', '--exclude=.agents', '--exclude=.aws', '--exclude=.ssh',
         '--exclude=.env', '--exclude=.env.*', '--exclude=wandb', '--exclude=recordings',
         '--exclude=node_modules', '-C', $repo, '.')

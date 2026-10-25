@@ -8,6 +8,8 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--task", default="GO2-PIPER-PAINT-Loco-Flat")
 parser.add_argument("--num_envs", type=int, default=16)
 parser.add_argument("--steps", type=int, default=100)
+parser.add_argument("--expected-policy-dim", type=int, choices=(235, 247), default=247,
+                    help="Existing custom joint observations include the arm: 247; leg-only variant: 235")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 launcher = AppLauncher(args)
@@ -30,7 +32,7 @@ def main():
     try:
         obs, _ = env.reset()
         assert env.action_manager.total_action_dim == 12
-        assert obs["policy"].shape == (args.num_envs, 235), obs["policy"].shape
+        assert obs["policy"].shape == (args.num_envs, args.expected_policy_dim), obs["policy"].shape
         robot = env.scene["robot"]
         _, names = robot.find_joints(LEG_JOINT_NAMES, preserve_order=True)
         assert names == LEG_JOINT_NAMES, names
@@ -62,7 +64,7 @@ def main():
             obs, reward, terminated, truncated, _ = env.step(torch.zeros(args.num_envs, 12, device=env.device))
             assert all(torch.isfinite(value).all() for value in obs.values())
             assert torch.isfinite(reward).all()
-            assert obs["policy"].shape == (args.num_envs, 235)
+            assert obs["policy"].shape == (args.num_envs, args.expected_policy_dim)
             assert torch.isfinite(env.scene["height_scanner"].data.ray_hits_w).all()
             assert torch.linalg.vector_norm(term.force_w, dim=-1).max() <= 40.001
             assert term.torque_w[..., 2].abs().max() <= 10.001
@@ -70,7 +72,7 @@ def main():
             assert torch.allclose(
                 robot.data.joint_pos_target[:, arm_ids], robot.data.default_joint_pos[:, arm_ids])
             resets += int((terminated | truncated).sum())
-        print(f"PASS {args.task}: {args.steps} steps, policy=235, actions=12, episode resets={resets}")
+        print(f"PASS {args.task}: {args.steps} steps, policy={args.expected_policy_dim}, actions=12, episode resets={resets}")
         print("This checks wiring and finite physics, not the performance of an untrained zero-action policy.")
     finally:
         env.close()

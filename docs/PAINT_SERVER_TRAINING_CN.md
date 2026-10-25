@@ -153,6 +153,95 @@ tensorboard --logdir logs/rsl_rl --host 127.0.0.1 --port 6006
 
 ## 5. 权重评估与导出
 
+### 固定指令测试：区分随机任务与控制不稳定
+
+默认 Play 仍随机采样速度，并保留 0–10 kg 附加负载、末端水平力/偏航力矩与推扰。
+因此随机转向、侧移不能单独作为策略失败依据。机械臂由 PD 保持固定关节目标，其世界坐标上下运动可能来自机身起伏，也可能是关节跟踪误差。
+先同步最新 `scripts/rsl_rl`（含 `eval_options.py`、`eval_metrics.py`），用同一 checkpoint 分别检查原地站立与固定向前速度：
+
+```bash
+cd ~/workspace/Go2_PAINT_Reproduction
+RUN_DIR="$PWD/logs/rsl_rl/go2_piper_paint_loco/2026-10-24_18-05-41_train_flat_20261024_180532_13553c07"
+
+# 原地、无附加负载/外扰、标称物理参数
+PYTHONPATH="$PWD/.runtime/rsl_rl_3_0_1${PYTHONPATH:+:$PYTHONPATH}" \
+python scripts/rsl_rl/play.py --task GO2-PIPER-PAINT-Loco-Flat-Play \
+  --checkpoint "$RUN_DIR/model_9999.pt" --num_envs 1 --headless --video --video_length 500 \
+  --base-command 0 0 0 --payload-mass 0 --no-disturbances --no-domain-randomization --eval-name stand
+
+# 同样条件，仅将指令变为向前 0.3 m/s
+PYTHONPATH="$PWD/.runtime/rsl_rl_3_0_1${PYTHONPATH:+:$PYTHONPATH}" \
+python scripts/rsl_rl/play.py --task GO2-PIPER-PAINT-Loco-Flat-Play \
+  --checkpoint "$RUN_DIR/model_9999.pt" --num_envs 1 --headless --video --video_length 500 \
+  --base-command 0.3 0 0 --payload-mass 0 --no-disturbances --no-domain-randomization --eval-name forward
+```
+
+每段 500 步约 10 秒仿真时间，不再随机将行走指令替换成站立，也不会由速度课程覆盖固定指令。
+`--payload-mass 0` 只移除额外等效负载，保留真实机械臂质量；不锁定机械臂、不修改 PD 增益或权重。
+`--no-domain-randomization` 使用标称物理参数与重复初始位姿。默认不传这些参数时，原 Play 行为保持不变。
+终止条件仍保留。新视频使用不同名称，避免站立与前进测试互相覆盖。
+
+脚本现在打印 checkpoint 加载、导出完成、每 100 步进度与最终完成信息。
+评估摘要写入同一 run 的 `evaluations/<eval-name>_<timestamp>.json`，包含：
+
+- 指令与实际 vx/vy/wz 的均值及逐轴 RMSE。
+- 机械臂关节相对固定目标的 RMSE 与最大绝对误差（rad），用于区分机身运动和机械臂关节偏差。
+- 总重置次数、超时重置次数与非超时重置次数（不是所有 reset 都是摔倒）。
+
+先比较站立和直行，再逐步增加负载与扰动；不要仅凭 10000 iterations 或一段随机视频认定训练成功。
+本地配置、路由、指标检查通过，真实物理结果需由服务器执行。当前已有权重的观测为 247 维；这些评估选项不改变观测顺序/维数或 12 维动作。
+
+### 包元数据与 C++ ABI 错误
+
+若 `diagnose` 显示 `rsl-rl-lib: null`，而 `rsl_rl` 路径指向 `TRON2_WholeBody_LAB/rsl_rl`，说明当前选中的是另一个项目的源码，不能硬编码为官方 3.0.1。
+可用项目内目录恢复训练时的官方版本，不卸载/覆盖 TRON2，不改 shell 配置，不安装/升级 Torch 等依赖：
+
+```bash
+cd ~/workspace/Go2_PAINT_Reproduction
+python scripts/paint/with_rsl3.py install
+python scripts/paint/with_rsl3.py check
+python scripts/paint/with_rsl3.py run scripts/paint/server_train.py diagnose
+```
+
+安装命令只执行 `pip install --no-deps --target .runtime/rsl_rl_3_0_1 rsl-rl-lib==3.0.1`。
+`check` 同时验证包元数据和模块位置均来自目标目录，防止“版本是官方、代码却来自 fork”。
+`run` 在子进程 PYTHONPATH 中将该目录置于首位，并使用当前 Python 执行后面的项目脚本。
+只安装并不会改变普通 `python ...` 的导入行为；后续 PAINT 命令需要通过 `with_rsl3.py run` 启动。
+`.runtime` 已从 Git 和同步脚本中排除，各机器独立安装。
+
+评估例子（替换成实际 checkpoint；其余参数与原 play 命令一致）：
+
+```bash
+python scripts/paint/with_rsl3.py run scripts/rsl_rl/play.py \
+  --task GO2-PIPER-PAINT-Loco-Flat-Play --checkpoint /absolute/path/model_9999.pt \
+  --num_envs 1 --headless --video --video_length 1500
+```
+
+此隔离入口只解决 RSL 代码/元数据选择，不替换 Conda 的 C++ 运行库。依赖使用当前环境已有版本，完整兼容性仍由实际评估验证。
+
+若日志同时出现 `No package metadata was found for rsl-rl-lib` 和 `CXXABI_1.3.15 not found`，需要分别处理：
+
+- RSL-RL 原本可能安装在 `~/.local` 用户包目录。启动 Python、用户包开关或 Kit 路径变化都可能影响可见性，不能直接断定未安装。新版训练/评估脚本在导入 Isaac 之前读取版本；不会硬编码版本或强行启用用户目录。
+- ABI 错误表示进程加载的系统 `libstdc++` 不满足 Conda ICU 的需求。不能通过更改 Python import、重训策略或升级 GPU 驱动解决这一条错误。
+
+先同步最新 `scripts/rsl_rl` 与 `scripts/paint`，在 `limx` 中运行：
+
+```bash
+python scripts/paint/server_train.py diagnose
+python -m pip show rsl-rl-lib
+```
+
+诊断会报告用户目录开关、搜索路径、选定的运行时环境变量、独立子进程的 SQLite 导入结果，以及 Conda C++ 库是否含所需标签。
+SQLite 子进程通过仍不能证明 Kit 内通过：后者可能先加载了另一份同名库。
+仅当 Conda 库实际存在且提供所需标签时，可先用单进程变量做验证，不修改 shell 全局配置或系统软链接：
+
+```bash
+strings "$CONDA_PREFIX/lib/libstdc++.so.6" | grep -F 'CXXABI_1.3.15'
+LD_PRELOAD="$CONDA_PREFIX/lib/libstdc++.so.6${LD_PRELOAD:+:$LD_PRELOAD}" python -c "import sqlite3; print(sqlite3.sqlite_version)"
+```
+
+若前者无输出/文件不存在，或后者仍失败，先根据诊断确定库版本，不盲目更换系统库或混装 Conda 通道。若验证通过，可将同样的 `LD_PRELOAD=...` 前缀用于单次 `python scripts/rsl_rl/play.py ...` 评估命令。
+
 旧版 Isaac Lab 可能没有 `isaaclab_rl.utils.pretrained_checkpoint`。新版 `play.py` 仅在显式传入 `--use_pretrained_checkpoint` 时导入该可选功能；使用自己训练的权重应传 `--checkpoint`。
 若旧脚本在这一行报 `ModuleNotFoundError`，同步最新 `scripts/rsl_rl/play.py` 后重试，无须重训或升级环境。
 相关路由已通过 5 项无仿真回归检查：`python scripts/paint/check_play_checkpoint.py`。

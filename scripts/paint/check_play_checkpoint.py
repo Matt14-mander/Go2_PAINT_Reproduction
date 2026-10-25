@@ -7,6 +7,7 @@ gym.make. This checks import isolation, not simulation or checkpoint weights.
 import ast
 import builtins
 import os
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -29,7 +30,7 @@ class StopBeforeSimulation(Exception):
 class CheckpointTests(unittest.TestCase):
     def make_context(self, checkpoint="/weights/model_9999.pt", pretrained=False):
         args = SimpleNamespace(task="GO2-PIPER-PAINT-Loco-Flat-Play", num_envs=1, device=None,
-                               use_pretrained_checkpoint=pretrained, checkpoint=checkpoint, video=False)
+                               use_pretrained_checkpoint=pretrained, checkpoint=checkpoint, video=False, eval_name="play")
         env = SimpleNamespace(scene=SimpleNamespace(num_envs=1), sim=SimpleNamespace(device="cpu"))
         agent = SimpleNamespace(seed=42, experiment_name="go2_piper_paint_loco",
                                 load_run="run", load_checkpoint="model_9999.pt")
@@ -37,6 +38,7 @@ class CheckpointTests(unittest.TestCase):
                        handle_deprecated_rsl_rl_cfg=lambda cfg, _: cfg, installed_version="3.0.1", os=os,
                        retrieve_file_path=Mock(return_value="/weights/model_9999.pt"),
                        get_checkpoint_path=Mock(return_value="/logs/run/model_9999.pt"),
+                       configure_evaluation=lambda cfg, args: None, datetime=datetime,
                        gym=SimpleNamespace(make=Mock(side_effect=StopBeforeSimulation)))
         exec(CODE, context)
         return context, env, agent

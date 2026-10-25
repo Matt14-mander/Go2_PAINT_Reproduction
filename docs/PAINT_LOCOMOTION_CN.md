@@ -41,7 +41,8 @@ python scripts/paint/smoke_locomotion.py --task GO2-PIPER-PAINT-Loco-Flat --num_
 python scripts/paint/smoke_locomotion.py --task GO2-PIPER-PAINT-Loco-Rough --num_envs 16 --steps 100 --headless
 ```
 
-Smoke 检查真实关节匹配、235 维观测、12 维动作、机械臂目标与 reset、外力边界、数值有限性。
+Smoke 检查真实关节匹配、247 维观测、12 维动作、机械臂目标与 reset、外力边界、数值有限性。
+原有自定义 `mdp.joint_pos_rel/joint_vel_rel` 使用默认的 18 关节名称列表，没有使用配置传入的 joint_ids，因此实际训练观测是 247 维而非原设计的 235 维。已有权重按 247 维评估；不要直接更改维数。
 零动作策略会摔倒；Smoke 通过不代表策略已经学会行走。
 本次代码改造未连接服务器，未执行 Isaac 仿真或训练；请先完成上面的集成检查。
 本地已通过 8 项 CPU 单元检查、Python 编译检查与 `git diff --check`。
@@ -82,7 +83,7 @@ python scripts/rsl_rl/play.py --task GO2-PIPER-PAINT-Loco-Rough-Play --num_envs 
 
 ## 与未来高层策略的接口
 
-策略单帧观测共 **235** 维，不堆历史，顺序如下：
+当前已训练策略单帧观测共 **247** 维，不堆历史，顺序如下：
 
 | 切片 | 内容 | 处理 |
 |---|---|---|
@@ -90,17 +91,17 @@ python scripts/rsl_rl/play.py --task GO2-PIPER-PAINT-Loco-Rough-Play --num_envs 
 | 3:6 | base angular velocity | body frame ×0.2 |
 | 6:9 | projected gravity | body frame |
 | 9:12 | vx, vy, wz command | m/s, m/s, rad/s |
-| 12:24 | leg position − default position | rad |
-| 24:36 | leg velocity | rad/s ×0.05 |
-| 36:48 | previous LL action | clip ±4，reset 后为 0 |
-| 48:235 | height scan | `sensor_z - ray_hit_z - 0.5`，clip ±1 |
+| 12:30 | leg + arm position − default position | rad，共 18 关节 |
+| 30:48 | leg + arm velocity | rad/s ×0.05，共 18 关节 |
+| 48:60 | previous LL action | 12 维，clip ±4，reset 后为 0 |
+| 60:247 | height scan | `sensor_z - ray_hit_z - 0.5`，clip ±1 |
 
 扫描采用 `GridPatternCfg(resolution=0.1, size=[1.6,1.0])`，跟随 base yaw；需保持 Isaac Lab 网格射线顺序。
 腿顺序：FR、FL、RR、RL，每条腿 hip、thigh、calf。不要按仿真内部自由度顺序直接切前 12 个关节。
 Critic 可见额外的真值外力，actor 看不到该真值；没有实现原始内部 backbone 的 wrench predictor。
 Actor 需要 base linear velocity（状态估计/里程计）和地形扫描。部署侧无法提供它们时，必须更换观测并重新训练，不能直接填 0。
 
-`mdp/paint_interface.py` 的 `PaintLocoInterface` 提供一致的观测拼接、缩放、动作裁剪和逐环境 reset。
+`mdp/paint_interface.py` 的 `PaintLocoInterface` 实现的是原设计的 235 维纯腿观测接口，**不能直接用于当前 247 维权重**。未来接入高层前，需要按保存的 env.yaml 与网络输入维度明确选择/实现对应接口；若改为 235 维，则需另训新权重。
 高层输出的速度先由 `process_base_command` 裁剪到训练范围并应用 0.05 的逐轴 deadband，再供给 LL。
 调用方应使用处理后的速度作为高层环境中实际 LL 指令；训练随机命令本身不施加 deadband。
 每 0.02 s 构造观测并调用导出策略一次，使用返回动作更新 LL 的 previous action。

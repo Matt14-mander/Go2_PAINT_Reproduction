@@ -79,3 +79,6 @@ MUJOCO_LOG.TXT
 # TacSL sensor
 **/tactile_record/*
 **/gelsight_r15_data/*
+
+# Project-local Python runtime overrides (installed on each machine)
+/.runtime/

@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import site
 import subprocess
 import sys
 import uuid
@@ -87,8 +88,30 @@ def diagnose_environment():
         ):
             path = directory / relative_path
             features[name] = symbol in path.read_text(encoding="utf-8") if path.is_file() else None
+    # Run native-library checks in a child: a failed ICU/SQLite import must not
+    # prevent the rest of this diagnostic report or alter this process's loader.
+    try:
+        probe = subprocess.run([sys.executable, "-c", "import sqlite3; print(sqlite3.sqlite_version)"],
+                               capture_output=True, text=True, timeout=20)
+        sqlite = {"returncode": probe.returncode, "stdout": probe.stdout.strip(), "stderr": probe.stderr.strip()}
+    except subprocess.TimeoutExpired:
+        sqlite = {"error": "SQLite probe timed out after 20 seconds"}
+    conda_cpp = None
+    if os.environ.get("CONDA_PREFIX"):
+        library = Path(os.environ["CONDA_PREFIX"]) / "lib/libstdc++.so.6"
+        conda_cpp = {"path": str(library), "exists": library.is_file()}
+        if library.is_file():
+            conda_cpp["resolved_path"] = str(library.resolve())
+            # Static label inspection only; this does not claim the library is
+            # binary-compatible with every Kit extension or alter LD_PRELOAD.
+            conda_cpp["contains_CXXABI_1.3.15_label"] = b"CXXABI_1.3.15" in library.read_bytes()
     return {"python": sys.version, "executable": sys.executable,
-            "packages": packages, "module_paths": modules, "source_features": features}
+            "packages": packages, "module_paths": modules, "source_features": features,
+            "python_search": {"enable_user_site": site.ENABLE_USER_SITE,
+                              "user_site": site.getusersitepackages(), "sys_path": list(sys.path)},
+            "runtime_environment": {name: os.environ.get(name) for name in
+                                    ("CONDA_PREFIX", "PYTHONNOUSERSITE", "PYTHONPATH", "LD_LIBRARY_PATH", "LD_PRELOAD")},
+            "sqlite3_probe": sqlite, "conda_cpp_runtime": conda_cpp}
 
 
 def rsl_runtime_profile(version, features):

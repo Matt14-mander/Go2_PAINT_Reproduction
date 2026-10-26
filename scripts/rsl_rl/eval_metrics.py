@@ -80,7 +80,7 @@ class TransportEvalMetrics:
         reference = action.reference()[mask]
         # Inspect the new deterministic teacher command at the observed state.
         command = action.base_command if actions is None else actions[:, :3]
-        limits = command.new_tensor([1., 1., 1.5])
+        limits = command.new_tensor(getattr(action.cfg, "command_limits", (1., 1., 1.5)))
         command = command.clamp(-limits, limits)
         command = torch.where(command.abs() < action.cfg.command_deadband, 0., command)[mask]
         velocity = torch.cat((data.root_lin_vel_b[:, :2], data.root_ang_vel_b[:, 2:3]), dim=-1)[mask]
@@ -109,6 +109,8 @@ class TransportEvalMetrics:
                   "time_limit_resets": self.timeouts if self.has_timeouts else None,
                   "non_timeout_resets": self.resets - self.timeouts if self.has_timeouts else None,
                   "ll_sha256": self.action.ll_sha256,
+                  "freeze_arm": getattr(self.action.cfg, "freeze_arm", False),
+                  "command_limits": list(getattr(self.action.cfg, "command_limits", (1., 1., 1.5))),
                   "sampling": "pre_step_excluding_reset_states; tilt maxima may miss the terminal physics step"}
         if self.count:
             values = self.sums / self.count

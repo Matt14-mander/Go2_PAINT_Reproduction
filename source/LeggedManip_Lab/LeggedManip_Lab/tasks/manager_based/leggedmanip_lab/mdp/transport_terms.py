@@ -49,6 +49,16 @@ def torque_tracking_cost(env):
                           action.robot.data.root_ang_vel_b[:, 2], env.cfg.literal_tracking_rewards)[1]
 
 
+def command_tracking_cost(env):
+    """Stage-1 shaping: anchor the generated command to the observed intent."""
+    action = term(env)
+    return (action.base_command - action.reference()).square().sum(-1)
+
+
+def base_tilt_cost(env):
+    return term(env).robot.data.projected_gravity_b[:, :2].square().sum(-1)
+
+
 def payload_height(env):
     action = term(env)
     relative = quat_apply_inverse(action.robot.data.root_quat_w,

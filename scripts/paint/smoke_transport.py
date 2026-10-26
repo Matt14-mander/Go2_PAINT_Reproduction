@@ -67,6 +67,17 @@ try:
         check_observation(obs)
         assert torch.count_nonzero(action.clean_history) == 0
         assert torch.count_nonzero(action.leg_actions) == 0
+        if getattr(action.cfg, "freeze_arm", False):
+            # Catch partial server sync: setting cfg.freeze_arm is insufficient
+            # if the action/math implementation still executes old code.
+            probe = torch.full((args.num_envs, 9), 100., device=env.device)
+            action.process_actions(probe)
+            default_arm = action.robot.data.default_joint_pos[:, action.arm_ids]
+            torch.testing.assert_close(action.arm_target, default_arm)
+            expected_limits = probe.new_tensor(action.cfg.command_limits).expand(args.num_envs, -1)
+            torch.testing.assert_close(action.base_command, expected_limits)
+            obs, _ = wrapper.reset()
+            print("[TRANSPORT] Stage1 fixed-arm/command-limit execution check passed", flush=True)
         if args.num_envs > 1:
             # Exercise reset of a subset after filling both LL and actor histories.
             command = torch.zeros(args.num_envs, 9, device=env.device)
@@ -120,6 +131,8 @@ try:
         report = {"task": args.task, "steps": args.steps, "num_envs": args.num_envs, "mode": args.mode,
                   "observation_dims": expected, "hl_actions": 9, "ll_actions": 12, "ll_sha256": action.ll_sha256,
                   "payload_mass": args.payload_mass, "wrench_scale": args.wrench_scale, "nominal": args.nominal,
+                  "freeze_arm": getattr(action.cfg, "freeze_arm", False),
+                  "command_limits": list(getattr(action.cfg, "command_limits", (1., 1., 1.5))),
                   "max_grasp_error_m": max_grasp_error, "terminations": terminated_count, "timeouts": timeout_count,
                   "mean_payload_height_in_base_m": payload_height_sum / args.steps,
                   "min_base_height_above_env_origin_m": min_base_height}

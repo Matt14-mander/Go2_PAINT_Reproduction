@@ -10,6 +10,8 @@ class PaintTransportEnv(ManagerBasedRLEnv):
             raise ValueError("observation_mode must be teacher or student")
         if cfg.arm_history_length != 8 or not 0 <= cfg.wrench_scale <= 1:
             raise ValueError("Expected H=8 and wrench_scale in [0,1]")
+        if not 0 <= cfg.zero_wrench_probability <= 1:
+            raise ValueError("zero_wrench_probability must be in [0,1]")
         cfg.actions.transport.ll_policy_path = cfg.ll_policy_path
         super().__init__(cfg, **kwargs)
 

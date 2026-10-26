@@ -230,6 +230,7 @@ def main():
     parser.add_argument("--max-yaw-rate", type=float, default=.4)
     parser.add_argument("--formation-gain", type=float, default=.4)
     parser.add_argument("--self-collisions", action="store_true")
+    parser.add_argument("--freeze-arm", action="store_true", help="Required execution contract for Stage1 Teacher: hold nominal arm targets")
     parser.add_argument("--duration", type=float, default=20.)
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--video", type=Path)
@@ -388,7 +389,7 @@ def main():
                         robot.command = np.clip(raw[:3], -limits, limits)
                         robot.command[np.abs(robot.command) < .05] = 0
                         leg = lows[index](robot.observation(robot.command))
-                        robot.set_transport_action(leg, raw[3:])
+                        robot.set_transport_action(leg, np.zeros(6) if args.freeze_arm else raw[3:])
                         state = final_status[index]
                         trace.writerow([float(data.time), index, *reference, *raw[:3], *robot.command,
                                         *state["actual_vx_vy_wz"], state["tilt_deg"], state["grasp_error_m"],
@@ -445,6 +446,7 @@ def main():
               "max_tilt_deg": peak_tilt.tolist(), "max_grasp_error_m": peak_grasp.tolist(),
               "command_safety_clipped_fraction": (clipped / max(controls, 1)).tolist(),
               "final_status": demo.status(), "self_collisions": args.self_collisions,
+              "freeze_arm": args.freeze_arm,
               "ll_policies": [{"path": str(p.path), "sha256": p.sha256} for p in lows],
               "hl_policies": [{"path": str(p.path), "sha256": p.sha256} for p in highs], "trace": str(trace_path)}
     if args.travel_distance is not None:

@@ -3,7 +3,7 @@
 import isaaclab.sim as sim_utils
 from isaaclab.assets import RigidObjectCfg
 from isaaclab.managers import CurriculumTermCfg, EventTermCfg, ObservationGroupCfg, ObservationTermCfg, RewardTermCfg
-from isaaclab.managers import SceneEntityCfg
+from isaaclab.managers import SceneEntityCfg, TerminationTermCfg
 from isaaclab.utils import configclass
 
 from .paint_loco_env_cfg import Go2PiperPaintLocoEnvCfg
@@ -80,6 +80,7 @@ class Go2PiperPaintTransportEnvCfg(Go2PiperPaintLocoEnvCfg):
     wrench_scale: float = 1.0
     periodic_disturbance: bool = True
     literal_tracking_rewards: bool = False
+    zero_wrench_probability: float = 0.02
 
     def __post_init__(self):
         super().__post_init__()
@@ -136,3 +137,48 @@ class Go2PiperPaintTransportRoughEnvCfg(Go2PiperPaintTransportEnvCfg):
         self.scene.terrain.terrain_generator.curriculum = True
         self.scene.terrain.max_init_terrain_level = 2
         self.curriculum.terrain_levels = CurriculumTermCfg(func=terms.terrain_progress)
+
+
+@configclass
+class TransportStage1RewardsCfg(TransportRewardsCfg):
+    """GO2 bootstrap shaping, explicitly different from the tutorial baseline."""
+    force_tracking = RewardTermCfg(func=terms.force_tracking_cost, weight=-2.0)
+    torque_tracking = RewardTermCfg(func=terms.torque_tracking_cost, weight=-1.0)
+    command_tracking = RewardTermCfg(func=terms.command_tracking_cost, weight=-0.5)
+    base_tilt = RewardTermCfg(func=terms.base_tilt_cost, weight=-0.5)
+    joint_dof = RewardTermCfg(func=terms.joint_dof, weight=-1e-5)
+    action = RewardTermCfg(func=terms.action_cost, weight=-2e-3)
+    # The arm is held, and the inherited height band does not match GO2's
+    # nominal grasp height. Neither term should drive this velocity bootstrap.
+    payload_height = None
+    arm_posture = None
+
+
+@configclass
+class Go2PiperPaintTransportStage1EnvCfg(Go2PiperPaintTransportEnvCfg):
+    """New 147/165/9 task: learn stable following with an explicitly fixed arm."""
+    def __post_init__(self):
+        super().__post_init__()
+        self.observation_mode = "teacher"
+        self.wrench_scale = 0.2
+        self.zero_wrench_probability = 0.2
+        self.periodic_disturbance = False
+        self.literal_tracking_rewards = False
+        self.actions.transport.freeze_arm = True
+        self.actions.transport.command_limits = (0.35, 0.35, 0.4)
+        self.rewards = TransportStage1RewardsCfg()
+        self.rewards.termination.weight = -50.0 / (self.sim.dt * self.decimation)
+        self.terminations.bad_orientation = TerminationTermCfg(func=mdp.bad_orientation, params={"limit_angle": 0.7})
+        self.scene.robot.spawn.articulation_props.enabled_self_collisions = False
+        for actuator in self.scene.robot.actuators.values():
+            actuator.min_delay = actuator.max_delay = 0
+        self.events.payload_mass.params["mass_range"] = (0.5, 0.5)
+        self.events.physics_material = None
+        self.events.payload_material = None
+        self.events.add_mass = None
+        self.events.reset_base.params["pose_range"] = {key: (0.0, 0.0) for key in ("x", "y", "yaw")}
+        self.events.reset_base.params["velocity_range"] = {key: (0.0, 0.0) for key in ("x", "y", "z", "roll", "pitch", "yaw")}
+        for name in ("reset_robot_joints", "reset_arm_joints"):
+            event = getattr(self.events, name)
+            event.params["position_range"] = (1.0, 1.0)
+            event.params["velocity_range"] = (0.0, 0.0)

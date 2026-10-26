@@ -14,6 +14,16 @@ spec.loader.exec_module(math)
 
 
 class TransportMathChecks(unittest.TestCase):
+    def test_stage1_holds_arm_despite_extreme_actor_output_and_limits_base(self):
+        defaults = torch.tensor([[0., .8, -1.2, 0., .4, 0.]])
+        limits = torch.tensor([[[-3., 3.]] * 6])
+        raw = torch.full((1, 9), 100.)
+        command, target, processed = math.process_transport_action(raw, defaults, limits,
+            command_limits=(.35, .35, .4), freeze_arm=True)
+        torch.testing.assert_close(target, defaults)
+        torch.testing.assert_close(command, torch.tensor([[.35, .35, .4]]))
+        torch.testing.assert_close(processed[:, 3:], torch.full((1, 6), 100.))
+
     def test_episode_profile(self):
         times = torch.tensor([-1, 0, .5, 1, 5, 9, 9.5, 10, 11])
         torch.testing.assert_close(math.wrench_profile(times), torch.tensor([0, 0, .5, 1, 1, 1, .5, 0, 0]))

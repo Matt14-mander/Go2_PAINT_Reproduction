@@ -8,6 +8,8 @@ GO2-PIPER 的 PAINT 底层 locomotion 改造：[任务、训练与冻结策略�
 
 PAINT Transport 环境：[独立载荷、冻结低层、高层接口与服务器 smoke 指南](docs/PAINT_TRANSPORT_CN.md)。
 
+Teacher重训：[Stage1固定机械臂训练配置与tmux启动](docs/PAINT_TEACHER_STAGE1_CN.md)。
+
 MuJoCo 多机 Demo：[共享载荷与可替换策略 pipeline](docs/PAINT_MUJOCO_COOP_CN.md)。
  
 [![Isaac Sim](https://img.shields.io/badge/Isaac%20Sim-5.1.0-blue.svg)](https://docs.isaacsim.omniverse.nvidia.com/latest/index.html)

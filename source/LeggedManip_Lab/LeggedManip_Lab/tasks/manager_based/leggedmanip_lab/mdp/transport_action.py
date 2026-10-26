@@ -92,7 +92,8 @@ class TransportAction(ActionTerm):
         self._raw.copy_(actions)
         self.base_command, self.arm_target, processed = process_transport_action(
             actions, self.robot.data.default_joint_pos[:, self.arm_ids],
-            self.robot.data.soft_joint_pos_limits[:, self.arm_ids], self.cfg.command_deadband)
+            self.robot.data.soft_joint_pos_limits[:, self.arm_ids], self.cfg.command_deadband,
+            self.cfg.command_limits, self.cfg.freeze_arm)
         self._processed.copy_(processed)
         data = self.robot.data
         scanner = self._env.scene["height_scanner"].data
@@ -158,7 +159,7 @@ class TransportAction(ActionTerm):
         velocity = grasp_velocity + torch.cross(angular, com_position - ee_position, dim=-1)
         self.payload.write_root_state_to_sim(torch.cat((position, quaternion, velocity, angular), dim=-1), env_ids=ids)
         target = torch.empty(len(ids), 3, device=self.device).uniform_(-1, 1) * self._env.cfg.wrench_scale
-        zero = torch.rand(len(ids), device=self.device) < 0.02
+        zero = torch.rand(len(ids), device=self.device) < self._env.cfg.zero_wrench_probability
         target[zero] = 0.0
         self.wrench_target[ids] = target
         self.start_position[ids] = data.root_pos_w[ids]
@@ -193,3 +194,5 @@ class TransportActionCfg(ActionTermCfg):
     asset_name: str = "robot"
     ll_policy_path: str = ""
     command_deadband: float = 0.05
+    command_limits: tuple[float, float, float] = (1.0, 1.0, 1.5)
+    freeze_arm: bool = False

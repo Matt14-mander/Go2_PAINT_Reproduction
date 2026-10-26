@@ -127,3 +127,18 @@ class Go2PiperPaintTransportPPORunnerCfg(Go2PiperFlatPPORunnerCfg):
         self.actor.obs_normalization = False
         self.critic.obs_normalization = False
 
+
+@configclass
+class Go2PiperPaintTransportStage1PPORunnerCfg(Go2PiperPaintTransportPPORunnerCfg):
+    experiment_name = "go2_piper_paint_teacher_stage1"
+    max_iterations = 5000
+    save_interval = 100
+    actor = RslRlMLPModelCfg(
+        hidden_dims=[512, 256, 128], activation="elu", obs_normalization=False,
+        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=0.1, std_type="log"))
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.algorithm.learning_rate = 1e-4
+        self.algorithm.entropy_coef = 1e-3
+

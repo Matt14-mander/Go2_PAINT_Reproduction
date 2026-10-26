@@ -11,16 +11,19 @@ def wrench_profile(time, episode_length=10.0):
     return torch.minimum(phase / 0.1, (1.0 - phase) / 0.1).clamp(0.0, 1.0)
 
 
-def process_transport_action(action, arm_default, arm_limits, deadband=0.05):
+def process_transport_action(action, arm_default, arm_limits, deadband=0.05,
+                             command_limits=(1.0, 1.0, 1.5), freeze_arm=False):
     if action.ndim != 2 or action.shape[1] != 9:
         raise ValueError("PAINT transport actions must be (N,9)")
     if not torch.isfinite(action).all():
         raise ValueError("Non-finite transport actions")
-    limits = action.new_tensor([1.0, 1.0, 1.5])
+    limits = action.new_tensor(command_limits)
+    if limits.shape != (3,) or not torch.isfinite(limits).all() or (limits <= 0).any():
+        raise ValueError("Expected three finite positive command limits")
     command = torch.maximum(torch.minimum(action[:, :3], limits), -limits)
     command = torch.where(command.abs() < deadband, 0.0, command)
     arm_action = action[:, 3:]
-    arm_target = arm_default + 0.5 * arm_action
+    arm_target = arm_default if freeze_arm else arm_default + 0.5 * arm_action
     arm_target = torch.maximum(torch.minimum(arm_target, arm_limits[..., 1]), arm_limits[..., 0])
     return command, arm_target, torch.cat((command, arm_action), dim=-1)
 

@@ -42,7 +42,7 @@ def action_state():
               root_lin_vel_b=torch.zeros(1, 3), root_ang_vel_b=torch.zeros(1, 3),
               projected_gravity_b=torch.tensor([[0., 0., -1.]]))
     return NS(_raw=torch.zeros(1, 9), raw_actions=torch.zeros(1, 9), previous_hl=torch.zeros(1, 9),
-              _processed=torch.zeros(1, 9), cfg=NS(command_deadband=.05), robot=NS(data=data),
+              _processed=torch.zeros(1, 9), cfg=NS(command_deadband=.05, command_limits=(1., 1., 1.5), freeze_arm=False), robot=NS(data=data),
               arm_ids=list(range(12, 18)), leg_ids=list(range(12)), obs_ids=list(range(18)),
               leg_actions=torch.zeros(1, 12), ll_policy=lambda obs: torch.zeros(1, 12),
               _env=NS(scene={"height_scanner": NS(data=NS(pos_w=torch.tensor([[0., 0., .35]]),

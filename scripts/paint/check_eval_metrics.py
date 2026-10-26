@@ -38,6 +38,24 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(result["non_timeout_resets"], 1)
         self.assertEqual(result["time_limit_resets"], 1)
 
+    def test_stage1_reports_raw_saturation_before_clipping_and_excludes_reset(self):
+        data = NS(root_lin_vel_b=torch.zeros(2, 3), root_ang_vel_b=torch.zeros(2, 3),
+                  joint_pos=torch.zeros(2, 6), default_joint_pos=torch.zeros(2, 6),
+                  projected_gravity_b=torch.tensor([[0., 0., -1.], [0., 0., -1.]]))
+        action = NS(robot=NS(data=data), arm_ids=list(range(6)), arm_target=torch.zeros(2, 6),
+                    reference=lambda: torch.zeros(2, 3), ll_sha256="test",
+                    cfg=NS(command_deadband=.05, command_limits=(.35, .35, .4), freeze_arm=True))
+        env = NS(action_manager=NS(get_term=lambda _: action), device="cpu",
+                 episode_length_buf=torch.tensor([2, 0]))
+        metric = module.TransportEvalMetrics(env)
+        metric.sample(torch.tensor([[.7, .01, -.8], [99., 99., 99.]]))
+        result = metric.summary()
+        self.assertEqual(result["raw_command_saturation_fraction_xyz"], [1., 0., 1.])
+        torch.testing.assert_close(torch.tensor(result["raw_command_max_abs_xyz"]), torch.tensor([.7, .01, .8]))
+        torch.testing.assert_close(torch.tensor(result["mean_teacher_command_vx_vy_wz"]),
+                                   torch.tensor([.35, 0., -.4]))
+        self.assertTrue(result["freeze_arm"])
+
     def test_tracking_arm_error_and_resets_are_distinct(self):
         data = NS(root_lin_vel_b=torch.tensor([[0.2, 0.0, 0.0]]),
                   root_ang_vel_b=torch.tensor([[0.0, 0.0, 0.1]]),

@@ -69,6 +69,8 @@ class TransportEvalMetrics:
         self.tilt_over_45 = 0
         self.count = self.resets = self.timeouts = 0
         self.has_timeouts = False
+        self.saturation_counts = torch.zeros(3, device=env.device)
+        self.raw_base_max = torch.zeros(3, device=env.device)
 
     def sample(self, actions=None):
         action = self.action
@@ -81,6 +83,8 @@ class TransportEvalMetrics:
         # Inspect the new deterministic teacher command at the observed state.
         command = action.base_command if actions is None else actions[:, :3]
         limits = command.new_tensor(getattr(action.cfg, "command_limits", (1., 1., 1.5)))
+        self.saturation_counts += (command[mask].abs() > limits + 1e-6).sum(0)
+        self.raw_base_max = torch.maximum(self.raw_base_max, command[mask].abs().max(0).values)
         command = command.clamp(-limits, limits)
         command = torch.where(command.abs() < action.cfg.command_deadband, 0., command)[mask]
         velocity = torch.cat((data.root_lin_vel_b[:, :2], data.root_ang_vel_b[:, 2:3]), dim=-1)[mask]
@@ -124,4 +128,6 @@ class TransportEvalMetrics:
                           max_tilt_deg=float(torch.rad2deg(self.max_tilt)),
                           max_abs_roll_deg=float(torch.rad2deg(self.max_roll)),
                           tilt_over_45_sample_fraction=self.tilt_over_45 / self.count)
+            result.update(raw_command_saturation_fraction_xyz=(self.saturation_counts / self.count).tolist(),
+                          raw_command_max_abs_xyz=self.raw_base_max.tolist())
         return result

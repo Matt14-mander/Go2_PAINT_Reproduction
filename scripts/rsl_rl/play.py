@@ -37,6 +37,7 @@ parser.add_argument("--video", action="store_true", default=False, help="Record 
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
 parser.add_argument("--export-only", action="store_true", help="Load checkpoint, export actor, and exit without a rollout")
 parser.add_argument("--export-dir", type=str, help="Explicit actor export directory, e.g. exported/model_9999")
+parser.add_argument("--eval-steps", type=int, help="Stop after N control steps, also in a desktop window without recording")
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
@@ -59,6 +60,8 @@ cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
+if args_cli.eval_steps is not None and args_cli.eval_steps < 1:
+    parser.error("--eval-steps must be positive")
 # always enable cameras to record video
 if args_cli.video:
     args_cli.enable_cameras = True
@@ -283,6 +286,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if timestep == 1 or timestep % 100 == 0:
             print(f"[EVAL] step={timestep}; sim_time={timestep * dt:.1f}s; "
                   f"wall_time={time.monotonic() - rollout_start:.1f}s", flush=True)
+        if args_cli.eval_steps is not None and timestep >= args_cli.eval_steps:
+            break
         if args_cli.video:
             # Exit the play loop after recording one video
             if timestep == args_cli.video_length:

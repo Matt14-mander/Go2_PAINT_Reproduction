@@ -2,6 +2,8 @@
 
 新任务：`GO2-PIPER-PAINT-Transport-Flat-Stage1`。它针对上一轮饱和/摆臂问题建立独立的平地高层训练基线，保留原始Flat/Rough任务、LL权重和Admittance Demo。第一阶段应从新Teacher初始化开始，不加载旧8600/9999高层权重。
 
+原Teacher的PPO超参数也未完全对齐教程，本次Stage1进一步作了明确调整；逐项差异见[PPO settings对照](PAINT_PPO_SETTINGS_COMPARISON_CN.md)。
+
 ## 第一阶段的实际配置
 
 | 项目 | 配置 |
@@ -96,6 +98,35 @@ smoke包含极端臂输入测试：在不推进物理的情况下输入100，检
 按Ctrl+B再D退出tmux保持训练；重新进入：`tmux attach-session -t paint_teacher_stage1`。
 
 ## 验收与后续策略部署
+
+### 本轮 model_4999：窗口测试，不录制
+
+先同步本地最新 `scripts/rsl_rl/play.py` 和 `scripts/rsl_rl/eval_metrics.py`，本次新增了 `--eval-steps` 与原始速度动作超限比例统计。旧服务器脚本不支持此参数。
+
+```bash
+conda activate limx
+cd ~/workspace/Go2_PAINT_Reproduction
+export CUDA_VISIBLE_DEVICES=1
+export PYTHONPATH="$PWD/.runtime/rsl_rl_3_0_1${PYTHONPATH:+:$PYTHONPATH}"
+RUN="$PWD/logs/rsl_rl/go2_piper_paint_teacher_stage1/2026-10-26_12-12-23_stage1_fixed_arm"
+LL="$PWD/logs/rsl_rl/go2_piper_paint_loco/2026-10-24_18-05-41_train_flat_20261024_180532_13553c07/exported/policy.pt"
+
+for CASE in force zero; do
+  SCALE=0.2
+  if [ "$CASE" = zero ]; then SCALE=0.0; fi
+  python -u scripts/rsl_rl/play.py \
+    --task GO2-PIPER-PAINT-Transport-Flat-Stage1 \
+    --checkpoint "$RUN/model_4999.pt" \
+    --device cuda:0 --num_envs 4 --seed 42 \
+    --eval-steps 1500 --eval-name "stage1_4999_$CASE" \
+    --export-dir "$RUN/exported/model_4999" \
+    "env.ll_policy_path=$LL" "env.wrench_scale=$SCALE" || break
+done
+```
+
+依次运行受力跟随、零力站稳两项，每项30秒仿真时间，实际耗时可能更长；窗口自动结束并保存 `RUN/evaluations/*.json`。物理GPU1在程序内映射为cuda:0。不要同时在该卡运行占满显存的训练。
+
+报告应显示 `freeze_arm=true`、`command_limits=[0.35,0.35,0.4]`，首先检查 `non_timeout_resets=0`、零力时指令与实际速度接近0、受力时实际速度误差与方向是否合理。`raw_command_saturation_fraction_xyz` 是各轴原始速度动作超过执行限幅的比例；若长期接近1，需要排查策略退化。10秒episode的timeout是正常重置；跨环境正负力会抵消均值，应结合RMSE和画面判断。
 
 先在同一个Stage1任务里用原生 `play.py` 评估新checkpoint，重点检查零力时的输出、指令/实际速度RMSE、非timeout终止、机械臂实际跟踪和最大倾角。不要把新Stage1权重用原 `GO2-PIPER-PAINT-Transport-Flat` 默认全臂配置回放。
 

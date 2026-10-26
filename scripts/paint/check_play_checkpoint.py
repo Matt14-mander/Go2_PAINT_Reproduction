@@ -10,6 +10,8 @@ import os
 import hashlib
 import json
 import tempfile
+import time
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,6 +34,20 @@ class StopBeforeSimulation(Exception):
 
 
 class CheckpointTests(unittest.TestCase):
+    def test_gui_rollout_stops_at_eval_steps_without_video(self):
+        loop = next(node for node in ast.walk(MAIN) if isinstance(node, ast.While))
+        code = compile(ast.fix_missing_locations(ast.Module(body=[loop], type_ignores=[])), str(SOURCE), "exec")
+        env = SimpleNamespace(step=Mock(return_value=(None, None, None, {})))
+        context = dict(simulation_app=SimpleNamespace(is_running=Mock(side_effect=[True] * 4)),
+                       torch=SimpleNamespace(inference_mode=nullcontext), policy=lambda obs: 0,
+                       policy_nn=SimpleNamespace(reset=Mock()), obs=None, env=env, metrics=None,
+                       version=version, installed_version="3.0.1", timestep=0, dt=.02,
+                       time=time, rollout_start=time.monotonic(),
+                       args_cli=SimpleNamespace(eval_steps=3, video=False, real_time=False))
+        exec(code, context)
+        self.assertEqual(context["timestep"], 3)
+        self.assertEqual(env.step.call_count, 3)
+
     def test_export_only_has_checkpoint_provenance_and_never_rolls_out(self):
         context, env_cfg, agent = self.make_context()
         with tempfile.TemporaryDirectory() as directory:

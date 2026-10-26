@@ -22,6 +22,7 @@ import yaml
 from cooperative_scene import build_scene, initialize_scene
 from cooperative_control import DesktopCommand, WrenchFollower, motion_profile, slew_command, velocity_target
 from cooperative_visuals import draw_guidance
+from grasp_audit import GraspAudit, normalized_input, payload_balance
 from paint_loco import JOINT_NAMES, MUJOCO_ROOT, PaintBridge, named_id
 
 
@@ -159,8 +160,7 @@ class CooperativeDemo:
     def normalized_wrench(self, robot, external_world, source):
         wrench = self.observed_world_wrench(robot, external_world, source)
         rotation = self.data.xmat[robot.base].reshape(3, 3)
-        force, torque = rotation.T @ wrench[:3], rotation.T @ wrench[3:]
-        return np.clip([force[0] / 40., force[1] / 40., torque[2] / 10.], -1, 1).astype(np.float32)
+        return normalized_input(wrench, rotation)[1].astype(np.float32)
 
     def reference_action(self, index, external_world, formation_gain, max_speed, max_yaw,
                          world_command=None, heading_target=None):
@@ -221,6 +221,7 @@ def main():
     parser.add_argument("--settle-seconds", type=float, default=2.)
     parser.add_argument("--ramp-seconds", type=float, default=3.)
     parser.add_argument("--wrench-source", choices=("external-share", "grasp"), default="external-share")
+    parser.add_argument("--audit-grasp", action="store_true", help="Log both grasp and external-share inputs without changing the chosen controller")
     parser.add_argument("--num-robots", type=int, default=2)
     parser.add_argument("--spacing", type=float, default=1.2)
     parser.add_argument("--payload-mass", type=float, default=.5)
@@ -300,6 +301,8 @@ def main():
     path = args.report or MUJOCO_ROOT.parent / f"logs/mujoco_coop/coop_{datetime.now():%Y%m%d_%H%M%S_%f}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     trace_path = path.with_suffix(".csv")
+    audit_path = path.with_suffix(".grasp.csv")
+    audit = None
     renderer = writer = None
     reason = "completed"
     started, next_frame, controls = time.monotonic(), 0., 0
@@ -321,7 +324,11 @@ def main():
             writer = imageio.get_writer(str(args.video), fps=args.fps)
         camera = mujoco.MjvCamera()
         camera.distance, camera.elevation, camera.azimuth = max(3., args.num_robots * 1.3), -25, args.camera_azimuth
-        with trace_path.open("w", newline="", encoding="utf-8") as stream, context as display:
+        with trace_path.open("w", newline="", encoding="utf-8") as stream, \
+                (audit_path.open("w", newline="", encoding="utf-8") if args.audit_grasp else nullcontext(None)) as audit_stream, \
+                context as display:
+            if audit_stream is not None:
+                audit = GraspAudit(audit_stream, args.num_robots, args.settle_seconds)
             if display is not None:
                 with display.lock():
                     display.cam.distance, display.cam.azimuth, display.cam.elevation = camera.distance, camera.azimuth, camera.elevation
@@ -350,6 +357,12 @@ def main():
                 data.xfrc_applied[demo.payload] = external
                 if step % 4 == 0:
                     mujoco.mj_forward(model, data)
+                    if audit is not None:
+                        reactions = [grasp_reaction(model, data, r.eq, demo.payload) for r in demo.robots]
+                        total, balance, extraction = payload_balance(model, data, demo.payload, demo.robots, reactions)
+                        for index, robot in enumerate(demo.robots):
+                            audit.sample(float(data.time), index, reactions[index], data.xmat[robot.base].reshape(3, 3),
+                                         external / args.num_robots, total, balance, extraction)
                     final_status = demo.status()
                     for index, robot in enumerate(demo.robots):
                         state = final_status[index]
@@ -455,6 +468,9 @@ def main():
         report["goal_position_world_xy_m"] = goal.tolist()
         report["goal_error_m"] = float(np.linalg.norm(data.xpos[demo.payload, :2] - goal))
         report["goal_reached"] = report["goal_error_m"] < .15
+    if audit is not None:
+        report["grasp_audit"] = audit.summary()
+        report["grasp_audit"]["trace"] = str(audit_path)
     path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"[COOP] {json.dumps(report)}\n[COOP] Report: {path}", flush=True)
     return 0 if reason in ("completed", "viewer_closed") else 2

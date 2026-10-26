@@ -85,8 +85,11 @@ class TransportAction(ActionTerm):
         return self.wrench_target * wrench_profile(time, self._env.cfg.episode_length_s).unsqueeze(-1)
 
     def process_actions(self, actions):
+        # Penalize the sampled actor action before command clipping. Otherwise
+        # e.g. vx=-1 and vx=-100 have identical dynamics AND action costs, leaving
+        # PPO no extra cost for moving arbitrarily far beyond the command limit.
+        self.previous_hl.copy_(self._raw)
         self._raw.copy_(actions)
-        self.previous_hl.copy_(self._processed)
         self.base_command, self.arm_target, processed = process_transport_action(
             actions, self.robot.data.default_joint_pos[:, self.arm_ids],
             self.robot.data.soft_joint_pos_limits[:, self.arm_ids], self.cfg.command_deadband)

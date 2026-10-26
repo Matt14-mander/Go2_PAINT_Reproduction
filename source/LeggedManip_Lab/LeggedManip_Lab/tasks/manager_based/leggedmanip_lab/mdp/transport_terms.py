@@ -69,7 +69,9 @@ def joint_dof(env):
 
 def action_cost(env):
     action = term(env)
-    return ((action.processed_actions - action.previous_hl).square() + 0.5 * action.processed_actions.square()).sum(-1)
+    # Use actor-space actions, not the many-to-one clipped command. Both the
+    # magnitude and temporal difference must use the same pre-clipping space.
+    return ((action.raw_actions - action.previous_hl).square() + 0.5 * action.raw_actions.square()).sum(-1)
 
 
 def arm_posture(env):

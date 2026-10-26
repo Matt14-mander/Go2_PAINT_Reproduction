@@ -142,3 +142,14 @@ class Go2PiperPaintTransportStage1PPORunnerCfg(Go2PiperPaintTransportPPORunnerCf
         self.algorithm.learning_rate = 1e-4
         self.algorithm.entropy_coef = 1e-3
 
+
+@configclass
+class Go2PiperPaintTransportStage2PPORunnerCfg(Go2PiperPaintTransportStage1PPORunnerCfg):
+    experiment_name = "go2_piper_paint_teacher_stage2"
+    max_iterations = 5000
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.algorithm.learning_rate = 5e-5
+        self.algorithm.entropy_coef = 5e-4
+

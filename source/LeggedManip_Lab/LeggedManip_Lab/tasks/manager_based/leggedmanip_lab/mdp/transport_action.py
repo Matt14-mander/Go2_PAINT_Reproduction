@@ -1,6 +1,7 @@
 """9-D transport action: frozen 247-D LL actor plus independently controlled arm."""
 
 import hashlib
+import math
 from pathlib import Path
 
 import torch
@@ -18,6 +19,17 @@ from .transport_math import append_history, locomotion_observation, process_tran
 class TransportAction(ActionTerm):
     def __init__(self, cfg, env):
         super().__init__(cfg, env)
+        if not math.isfinite(cfg.arm_scale) or cfg.arm_scale <= 0:
+            raise ValueError("arm_scale must be finite and positive")
+        for limit in (cfg.arm_max_offset, cfg.arm_max_speed):
+            if limit is not None and (not math.isfinite(limit) or limit <= 0):
+                raise ValueError("Arm offset/speed limits must be finite and positive")
+        phases = (cfg.settle_seconds, cfg.force_ramp_seconds, cfg.stop_hold_seconds)
+        if not all(math.isfinite(t) and t >= 0 for t in phases):
+            raise ValueError("Transport phase durations must be finite and non-negative")
+        if any(phases) and (cfg.force_ramp_seconds <= 0 or
+                cfg.settle_seconds + 2 * cfg.force_ramp_seconds + cfg.stop_hold_seconds >= env.cfg.episode_length_s):
+            raise ValueError("Transport episode must contain startup, force ramps, hold, and zero-force tail")
         self.robot = self._asset
         self.payload = env.scene["payload"]
         self.leg_ids, _ = self.robot.find_joints(LEG_JOINT_NAMES, preserve_order=True)
@@ -48,6 +60,7 @@ class TransportAction(ActionTerm):
         self.base_command = torch.zeros(count, 3, device=device)
         self.leg_actions = torch.zeros(count, 12, device=device)
         self.arm_target = self.robot.data.default_joint_pos[:, self.arm_ids].clone()
+        self.previous_arm_target = self.arm_target.clone()
         self.leg_target = self.robot.data.default_joint_pos[:, self.leg_ids].clone()
         self.wrench_target = torch.zeros(count, 3, device=device)
         self.start_position = torch.zeros(count, 3, device=device)
@@ -82,7 +95,8 @@ class TransportAction(ActionTerm):
 
     def reference(self, offset=0.0):
         time = self._env.episode_length_buf * self._env.step_dt + offset
-        return self.wrench_target * wrench_profile(time, self._env.cfg.episode_length_s).unsqueeze(-1)
+        return self.wrench_target * wrench_profile(time, self._env.cfg.episode_length_s,
+            self.cfg.settle_seconds, self.cfg.force_ramp_seconds, self.cfg.stop_hold_seconds).unsqueeze(-1)
 
     def process_actions(self, actions):
         # Penalize the sampled actor action before command clipping. Otherwise
@@ -90,10 +104,21 @@ class TransportAction(ActionTerm):
         # PPO no extra cost for moving arbitrarily far beyond the command limit.
         self.previous_hl.copy_(self._raw)
         self._raw.copy_(actions)
+        if hasattr(self, "previous_arm_target"):
+            self.previous_arm_target.copy_(self.arm_target)
         self.base_command, self.arm_target, processed = process_transport_action(
             actions, self.robot.data.default_joint_pos[:, self.arm_ids],
             self.robot.data.soft_joint_pos_limits[:, self.arm_ids], self.cfg.command_deadband,
-            self.cfg.command_limits, self.cfg.freeze_arm)
+            self.cfg.command_limits, self.cfg.freeze_arm,
+            arm_scale=getattr(self.cfg, "arm_scale", 0.5),
+            arm_max_offset=getattr(self.cfg, "arm_max_offset", None),
+            arm_max_speed=getattr(self.cfg, "arm_max_speed", None),
+            previous_target=getattr(self, "arm_target", None), dt=getattr(self._env, "step_dt", 0.02))
+        if getattr(self.cfg, "settle_seconds", 0) > 0:
+            settling = self._env.episode_length_buf * self._env.step_dt < self.cfg.settle_seconds
+            self.base_command[settling] = 0
+            self.arm_target[settling] = self.robot.data.default_joint_pos[settling][:, self.arm_ids]
+            processed[settling, :3] = 0
         self._processed.copy_(processed)
         data = self.robot.data
         scanner = self._env.scene["height_scanner"].data
@@ -139,6 +164,7 @@ class TransportAction(ActionTerm):
                       self.robot_forces, self.robot_torques, self.payload_forces, self.payload_torques):
             value[ids] = 0.0
         self.arm_target[ids] = self.robot.data.default_joint_pos[ids][:, self.arm_ids]
+        self.previous_arm_target[ids] = self.arm_target[ids]
         self.leg_target[ids] = self.robot.data.default_joint_pos[ids][:, self.leg_ids]
         self.wrench_target[ids] = 0.0
         self.history_step[ids] = self._env.common_step_counter
@@ -196,3 +222,9 @@ class TransportActionCfg(ActionTermCfg):
     command_deadband: float = 0.05
     command_limits: tuple[float, float, float] = (1.0, 1.0, 1.5)
     freeze_arm: bool = False
+    arm_scale: float = 0.5
+    arm_max_offset: float | None = None
+    arm_max_speed: float | None = None
+    settle_seconds: float = 0.0
+    force_ramp_seconds: float = 0.0
+    stop_hold_seconds: float = 0.0

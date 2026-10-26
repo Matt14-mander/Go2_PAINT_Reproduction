@@ -182,3 +182,28 @@ class Go2PiperPaintTransportStage1EnvCfg(Go2PiperPaintTransportEnvCfg):
             event = getattr(self.events, name)
             event.params["position_range"] = (1.0, 1.0)
             event.params["velocity_range"] = (0.0, 0.0)
+
+
+@configclass
+class TransportStage2RewardsCfg(TransportStage1RewardsCfg):
+    arm_posture = RewardTermCfg(func=terms.arm_posture, weight=-0.02)
+    arm_target_speed = RewardTermCfg(func=terms.arm_target_speed_cost, weight=-0.005)
+    arm_soft_limit = RewardTermCfg(func=terms.arm_soft_limit_cost, weight=-0.5)
+    payload_swing = RewardTermCfg(func=terms.payload_swing_cost, weight=-0.02)
+
+
+@configclass
+class Go2PiperPaintTransportStage2EnvCfg(Go2PiperPaintTransportStage1EnvCfg):
+    """Stage2A: bounded arm residuals, with startup and post-release observation."""
+    def __post_init__(self):
+        super().__post_init__()
+        self.episode_length_s = 15.0
+        self.actions.transport.freeze_arm = False
+        self.actions.transport.arm_scale = 0.1
+        self.actions.transport.arm_max_offset = 0.1
+        self.actions.transport.arm_max_speed = 0.2
+        self.actions.transport.settle_seconds = 1.0
+        self.actions.transport.force_ramp_seconds = 2.0
+        self.actions.transport.stop_hold_seconds = 3.0
+        self.rewards = TransportStage2RewardsCfg()
+        self.rewards.termination.weight = -50.0 / (self.sim.dt * self.decimation)

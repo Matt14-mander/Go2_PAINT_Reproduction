@@ -3,16 +3,23 @@
 import torch
 
 
-def wrench_profile(time, episode_length=10.0):
+def wrench_profile(time, episode_length=10.0, settle=0.0, ramp=0.0, stop_hold=0.0):
     """10% ramp-up, 80% hold, 10% ramp-down, clamped outside the episode."""
     if episode_length <= 0:
         raise ValueError("episode_length must be positive")
+    if ramp > 0:
+        if settle < 0 or stop_hold < 0 or settle + stop_hold + 2 * ramp >= episode_length:
+            raise ValueError("Force profile needs positive hold time between ramps")
+        return torch.minimum((time - settle) / ramp,
+                             (episode_length - stop_hold - time) / ramp).clamp(0.0, 1.0)
     phase = time / episode_length
     return torch.minimum(phase / 0.1, (1.0 - phase) / 0.1).clamp(0.0, 1.0)
 
 
 def process_transport_action(action, arm_default, arm_limits, deadband=0.05,
-                             command_limits=(1.0, 1.0, 1.5), freeze_arm=False):
+                             command_limits=(1.0, 1.0, 1.5), freeze_arm=False,
+                             arm_scale=0.5, arm_max_offset=None, arm_max_speed=None,
+                             previous_target=None, dt=0.02):
     if action.ndim != 2 or action.shape[1] != 9:
         raise ValueError("PAINT transport actions must be (N,9)")
     if not torch.isfinite(action).all():
@@ -23,8 +30,17 @@ def process_transport_action(action, arm_default, arm_limits, deadband=0.05,
     command = torch.maximum(torch.minimum(action[:, :3], limits), -limits)
     command = torch.where(command.abs() < deadband, 0.0, command)
     arm_action = action[:, 3:]
-    arm_target = arm_default if freeze_arm else arm_default + 0.5 * arm_action
+    residual = arm_scale * arm_action
+    if arm_max_offset is not None:
+        if arm_max_offset <= 0:
+            raise ValueError("arm_max_offset must be positive")
+        residual = residual.clamp(-arm_max_offset, arm_max_offset)
+    arm_target = arm_default if freeze_arm else arm_default + residual
     arm_target = torch.maximum(torch.minimum(arm_target, arm_limits[..., 1]), arm_limits[..., 0])
+    if arm_max_speed is not None and not freeze_arm:
+        if arm_max_speed <= 0 or dt <= 0 or previous_target is None:
+            raise ValueError("Arm slew limiter needs positive speed/dt and previous_target")
+        arm_target = previous_target + (arm_target - previous_target).clamp(-arm_max_speed * dt, arm_max_speed * dt)
     return command, arm_target, torch.cat((command, arm_action), dim=-1)
 
 

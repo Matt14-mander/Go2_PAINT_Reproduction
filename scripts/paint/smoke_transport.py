@@ -78,6 +78,19 @@ try:
             torch.testing.assert_close(action.base_command, expected_limits)
             obs, _ = wrapper.reset()
             print("[TRANSPORT] Stage1 fixed-arm/command-limit execution check passed", flush=True)
+        if getattr(action.cfg, "arm_max_offset", None) is not None:
+            probe = torch.full((args.num_envs, 9), 100., device=env.device)
+            default_arm = action.robot.data.default_joint_pos[:, action.arm_ids]
+            action.process_actions(probe)
+            torch.testing.assert_close(action.arm_target, default_arm)
+            assert torch.count_nonzero(action.base_command) == 0
+            env.episode_length_buf[:] = int(round(action.cfg.settle_seconds / env.step_dt)) + 1
+            action.process_actions(probe)
+            delta = (action.arm_target - default_arm).abs()
+            assert delta.max() <= action.cfg.arm_max_speed * env.step_dt + 1e-6
+            assert delta.max() > 0
+            obs, _ = wrapper.reset()
+            print("[TRANSPORT] Stage2 startup/arm-slew execution check passed", flush=True)
         if args.num_envs > 1:
             # Exercise reset of a subset after filling both LL and actor histories.
             command = torch.zeros(args.num_envs, 9, device=env.device)
@@ -106,12 +119,22 @@ try:
             command = torch.zeros(args.num_envs, 9, device=env.device)
             if args.agent == "reference":
                 command[:, :3] = action.reference()
+                if getattr(action.cfg, "arm_max_offset", None) is not None:
+                    command[:, 3:] = 0.5 * torch.sin(command.new_tensor(step * env.step_dt))
             obs, reward, terminated, truncated, extras = wrapper.step(command)
             check_observation(obs)
             assert torch.isfinite(reward).all()
             assert extras["teacher_obs"].shape == (args.num_envs, 147)
             assert action.leg_actions.shape == (args.num_envs, 12)
             assert torch.isfinite(action.payload_forces).all()
+            if getattr(action.cfg, "arm_max_offset", None) is not None:
+                default_arm = action.robot.data.default_joint_pos[:, action.arm_ids]
+                assert (action.arm_target - default_arm).abs().max() <= action.cfg.arm_max_offset + 1e-6
+                # Reset states have deliberately reinitialized targets and are excluded.
+                active = env.episode_length_buf > 0
+                if active.any():
+                    speed = (action.arm_target[active] - action.previous_arm_target[active]).abs() / env.step_dt
+                    assert speed.max() <= action.cfg.arm_max_speed + 1e-5
             anchor = action.payload.data.root_pos_w + quat_apply(action.payload.data.root_quat_w, action.grasp_position)
             distance = torch.linalg.vector_norm(anchor - action.robot.data.body_pos_w[:, action.ee_id], dim=-1)
             max_grasp_error = max(max_grasp_error, distance.max().item())
@@ -132,12 +155,14 @@ try:
                   "observation_dims": expected, "hl_actions": 9, "ll_actions": 12, "ll_sha256": action.ll_sha256,
                   "payload_mass": args.payload_mass, "wrench_scale": args.wrench_scale, "nominal": args.nominal,
                   "freeze_arm": getattr(action.cfg, "freeze_arm", False),
+                  "arm_max_offset_rad": action.cfg.arm_max_offset,
+                  "arm_max_target_speed_rad_s": action.cfg.arm_max_speed,
                   "command_limits": list(getattr(action.cfg, "command_limits", (1., 1., 1.5))),
                   "max_grasp_error_m": max_grasp_error, "terminations": terminated_count, "timeouts": timeout_count,
                   "mean_payload_height_in_base_m": payload_height_sum / args.steps,
                   "min_base_height_above_env_origin_m": min_base_height}
         (directory / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-        if args.steps >= 500 and timeout_count == 0:
+        if args.steps >= env.max_episode_length and timeout_count == 0:
             raise RuntimeError(f"No episode survived to timeout; physical stability needs investigation. Report: {directory}")
         if args.nominal and terminated_count:
             raise RuntimeError(f"Nominal smoke had {terminated_count} falls; inspect payload alignment/contact. Report: {directory}")

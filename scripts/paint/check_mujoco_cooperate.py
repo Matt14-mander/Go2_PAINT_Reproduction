@@ -7,6 +7,7 @@ import io
 import json
 import csv
 import subprocess
+import hashlib
 import unittest
 
 import mujoco
@@ -51,6 +52,33 @@ class CooperativeChecks(unittest.TestCase):
             with report.with_suffix(".csv").open(newline="") as stream:
                 trace = list(csv.DictReader(stream))
             self.assertTrue(all(float(row["reference_cx"]) == 0. for row in trace))
+
+            # A Stage2 export must execute its bounded arm contract in the real CLI.
+            from transport_contract import load_stage2_contract
+            hl = torch.nn.Linear(147, 9)
+            with torch.no_grad():
+                hl.weight.zero_()
+                hl.bias.zero_()
+                hl.bias[3:] = 100.
+            with (root / "hl.pt").open("wb") as stream:
+                torch.jit.save(torch.jit.trace(hl, torch.zeros(1, 147)), stream)
+            manifest = {"task": "GO2-PIPER-PAINT-Transport-Flat-Stage2",
+                        "policy_sha256": hashlib.sha256((root / "hl.pt").read_bytes()).hexdigest(),
+                        "transport_action": {"freeze_arm": False, "arm_scale": .1, "arm_max_offset": .1,
+                            "arm_max_speed": .2, "control_dt": .02, "settle_seconds": 1.,
+                            "force_ramp_seconds": 2., "stop_hold_seconds": 3.,
+                            "command_limits": [.35, .35, .4], "command_deadband": .05}}
+            (root / "manifest.json").write_text(json.dumps(manifest))
+            self.assertIsNotNone(load_stage2_contract([root / "hl.pt"]))
+            stage2_report = root / "stage2.json"
+            result = subprocess.run([sys.executable, str(ENTRY / "paint_cooperate.py"),
+                "--ll-policy", str(root / "ll.pt"), "--controller", "teacher", "--hl-policy", str(root / "hl.pt"),
+                "--require-stage2-contract", "--headless", "--duration", "9", "--force-world", "0", "0", "0",
+                "--report", str(stage2_report)], capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            summary = json.loads(stage2_report.read_text())
+            np.testing.assert_allclose(summary["max_arm_target_offset_rad"], .1, atol=1e-6)
+            self.assertLessEqual(max(summary["max_arm_target_speed_rad_s"]), .20001)
 
     def test_grasp_audit_axes_scaling_and_missing_calibration(self):
         rotation = np.array([[0., -1., 0.], [1., 0., 0.], [0., 0., 1.]])

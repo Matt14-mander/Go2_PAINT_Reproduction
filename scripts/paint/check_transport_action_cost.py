@@ -50,6 +50,25 @@ def action_state():
 
 
 class CostChecks(unittest.TestCase):
+    def test_stage2_startup_then_arm_slew_uses_previous_target(self):
+        action = action_state()
+        action.arm_target = torch.zeros(1, 6)
+        action.previous_arm_target = torch.zeros(1, 6)
+        action.cfg.arm_scale, action.cfg.arm_max_offset, action.cfg.arm_max_speed = .1, .1, .2
+        action.cfg.settle_seconds = 1.
+        action._env.step_dt = .02
+        action._env.episode_length_buf = torch.zeros(1, dtype=torch.long)
+        probe = torch.full((1, 9), 100.)
+        process(action, probe)
+        torch.testing.assert_close(action.base_command, torch.zeros(1, 3))
+        torch.testing.assert_close(action.arm_target, torch.zeros(1, 6))
+        action._env.episode_length_buf[:] = 51
+        process(action, probe)
+        torch.testing.assert_close(action.arm_target, torch.full((1, 6), .004))
+        process(action, probe)
+        torch.testing.assert_close(action.previous_arm_target, torch.full((1, 6), .004))
+        torch.testing.assert_close(action.arm_target, torch.full((1, 6), .008))
+
     def test_same_executed_command_has_larger_cost_for_excessive_raw_output(self):
         action = action_state()
         action.raw_actions = action._raw

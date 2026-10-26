@@ -40,6 +40,7 @@ parser.add_argument(
 )
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
+parser.add_argument("--warm-start", type=str, help="Stage2 only: initialize from Stage1 checkpoint with fresh optimizer and arm head")
 parser.add_argument(
     "--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes."
 )
@@ -87,6 +88,8 @@ if version.parse(installed_version) < version.parse(RSL_RL_VERSION):
 """Rest everything follows."""
 
 import logging
+import json
+from pathlib import Path
 import os
 import time
 from datetime import datetime
@@ -140,6 +143,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    stage2 = args_cli.task == "GO2-PIPER-PAINT-Transport-Flat-Stage2"
+    if args_cli.warm_start:
+        if not stage2 or agent_cfg.resume or args_cli.distributed:
+            raise ValueError("--warm-start requires Stage2, no --resume, and a single training process")
+        if not version.parse("3.0.1") <= version.parse(installed_version) < version.parse("4.0.0"):
+            raise RuntimeError("Stage2 warm start is verified for RSL-RL 3.x; use the project's isolated 3.0.1 environment")
+        if not Path(args_cli.warm_start).expanduser().is_file():
+            raise FileNotFoundError(args_cli.warm_start)
+    if stage2 and not (args_cli.warm_start or agent_cfg.resume):
+        raise ValueError("Stage2 needs --warm-start STAGE1_MODEL or --resume for an existing Stage2 run")
     # check for invalid combination of CPU device with distributed training
     if args_cli.distributed and args_cli.device is not None and "cpu" in args_cli.device:
         raise ValueError(
@@ -224,12 +237,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # load previously trained model
         runner.load(resume_path)
 
+    if args_cli.warm_start:
+        from stage2_warm_start import warm_start_stage2
+        transfer = warm_start_stage2(runner, args_cli.warm_start)
+        transfer["ll_sha256"] = env.unwrapped.action_manager.get_term("transport").ll_sha256
+        Path(log_dir).mkdir(parents=True, exist_ok=True)
+        (Path(log_dir) / "warm_start.json").write_text(json.dumps(transfer, indent=2), encoding="utf-8")
+        print(f"[STAGE2] Warm start: {json.dumps(transfer)}", flush=True)
+
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
 
     # run training
-    runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
+    runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=not stage2)
 
     print(f"Training time: {round(time.time() - start_time, 2)} seconds")
 

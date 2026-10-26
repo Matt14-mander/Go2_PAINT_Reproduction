@@ -245,7 +245,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if "GO2-PIPER-PAINT-Transport-" in args_cli.task:
         manifest["transport_action"] = {
             "freeze_arm": env_cfg.actions.transport.freeze_arm,
-            "command_limits": list(env_cfg.actions.transport.command_limits)}
+            "command_limits": list(env_cfg.actions.transport.command_limits),
+            **{key: getattr(env_cfg.actions.transport, key) for key in
+               ("arm_scale", "arm_max_offset", "arm_max_speed", "settle_seconds", "force_ramp_seconds", "stop_hold_seconds")},
+            "control_dt": env.unwrapped.step_dt,
+            "command_deadband": env_cfg.actions.transport.command_deadband}
     with open(os.path.join(export_model_dir, "manifest.json"), "w", encoding="utf-8") as stream:
         json.dump(manifest, stream, indent=2)
     print(f"[EVAL] Policy export finished: {export_model_dir}", flush=True)

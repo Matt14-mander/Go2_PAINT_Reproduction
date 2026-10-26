@@ -23,6 +23,7 @@ from cooperative_scene import build_scene, initialize_scene
 from cooperative_control import DesktopCommand, WrenchFollower, motion_profile, slew_command, velocity_target
 from cooperative_visuals import draw_guidance
 from grasp_audit import GraspAudit, normalized_input, payload_balance
+from transport_contract import load_stage2_contract, arm_target, force_profile
 from paint_loco import JOINT_NAMES, MUJOCO_ROOT, PaintBridge, named_id
 
 
@@ -92,12 +93,17 @@ class RobotBridge(PaintBridge):
     def teacher_observation(self, normalized_wrench):
         return np.concatenate((self.history.ravel(), normalized_wrench)).astype(np.float32)
 
-    def set_transport_action(self, leg_action, arm_action):
+    def set_transport_action(self, leg_action, arm_action, contract=None, settling=False):
+        previous = self.target[12:].copy()
         self.set_action(leg_action)
         limits = self.model.jnt_range[self.joint_ids[12:]]
         # Match Isaac's soft_joint_pos_limit_factor=0.9 about each limit midpoint.
         midpoint, radius = limits.mean(1), (limits[:, 1] - limits[:, 0]) * .45
         self.target[12:] = np.clip(self.default[12:] + .5 * arm_action, midpoint - radius, midpoint + radius)
+        if contract is not None:
+            soft_limits = np.column_stack((midpoint - radius, midpoint + radius))
+            self.target[12:] = (self.default[12:] if settling else
+                               arm_target(arm_action, self.default[12:], soft_limits, previous, contract))
 
     def write_torques(self):
         torque = self.kp * (self.target - self.data.qpos[self.qpos_ids]) - self.kd * self.data.qvel[self.qvel_ids]
@@ -222,6 +228,7 @@ def main():
     parser.add_argument("--ramp-seconds", type=float, default=3.)
     parser.add_argument("--wrench-source", choices=("external-share", "grasp"), default="external-share")
     parser.add_argument("--audit-grasp", action="store_true", help="Log both grasp and external-share inputs without changing the chosen controller")
+    parser.add_argument("--require-stage2-contract", action="store_true", help="Fail if matching Stage2 policy manifest is missing")
     parser.add_argument("--num-robots", type=int, default=2)
     parser.add_argument("--spacing", type=float, default=1.2)
     parser.add_argument("--payload-mass", type=float, default=.5)
@@ -243,6 +250,18 @@ def main():
     args = parser.parse_args()
     if args.force_world is None:
         args.force_world = [8., 0., 0.] if args.drive == "wrench" else [0., 0., 0.]
+    contract = load_stage2_contract(args.hl_policy)
+    if args.require_stage2_contract and contract is None:
+        parser.error("Copy the Stage2 exported manifest.json alongside policy.pt")
+    if contract is not None:
+        if args.freeze_arm or args.controller != "teacher":
+            parser.error("Stage2 manifest requires teacher mode with the arm enabled; omit --freeze-arm")
+        if not np.allclose(contract["command_limits"], [args.max_speed, args.max_speed, args.max_yaw_rate]):
+            parser.error("Command limits must match the Stage2 manifest")
+        args.settle_seconds = contract["settle_seconds"]
+        args.ramp_seconds = contract["force_ramp_seconds"]
+        force_profile(0., args.duration, contract)
+        print(f"[COOP] Stage2 execution contract loaded: {json.dumps(contract)}", flush=True)
     numbers = [args.spacing, args.payload_mass, args.duration, args.max_speed, args.max_yaw_rate,
                args.formation_gain, args.camera_azimuth, args.settle_seconds, args.ramp_seconds, args.admittance_gain,
                *args.force_world, *args.command_world]
@@ -309,6 +328,8 @@ def main():
     peak_tilt = np.zeros(args.num_robots)
     peak_grasp = np.zeros(args.num_robots)
     clipped = np.zeros(args.num_robots, int)
+    arm_offset_max = np.zeros(args.num_robots)
+    arm_speed_max = np.zeros(args.num_robots)
     initial_payload = data.xpos[demo.payload].copy()
     external = np.zeros(6)
     group_command = np.zeros(3)
@@ -337,7 +358,8 @@ def main():
                             "command_vx", "command_vy", "command_wz", "actual_vx", "actual_vy", "actual_wz", "tilt_deg", "grasp_error_m",
                             "payload_external_Fx", "payload_external_Fy", "payload_external_Tz",
                             "input_wrench_world_Fx", "input_wrench_world_Fy", "input_wrench_world_Fz",
-                            "input_wrench_world_Tx", "input_wrench_world_Ty", "input_wrench_world_Tz"])
+                            "input_wrench_world_Tx", "input_wrench_world_Ty", "input_wrench_world_Tz",
+                            *[f"arm_target_joint{i}_rad" for i in range(1, 7)]])
             step = 0
             while step < int(round(args.duration / model.opt.timestep)):
                 wall = time.monotonic()
@@ -351,8 +373,9 @@ def main():
                     continue
                 external[:] = 0
                 force_request = requested if args.drive == "wrench" else np.asarray(args.force_world)
-                external[[0, 1, 5]] = force_request * motion_profile(
-                    data.time, args.duration, args.settle_seconds, args.ramp_seconds)
+                profile = (force_profile(data.time, args.duration, contract) if contract is not None else
+                           motion_profile(data.time, args.duration, args.settle_seconds, args.ramp_seconds))
+                external[[0, 1, 5]] = force_request * profile
                 data.xfrc_applied[:] = 0
                 data.xfrc_applied[demo.payload] = external
                 if step % 4 == 0:
@@ -400,13 +423,20 @@ def main():
                         limits = np.array([args.max_speed, args.max_speed, args.max_yaw_rate])
                         clipped[index] += int(np.any(np.abs(raw[:3]) > limits + 1e-6))
                         robot.command = np.clip(raw[:3], -limits, limits)
-                        robot.command[np.abs(robot.command) < .05] = 0
+                        deadband = contract["command_deadband"] if contract is not None else .05
+                        robot.command[np.abs(robot.command) < deadband] = 0
+                        settling = contract is not None and data.time < contract["settle_seconds"]
+                        if settling:
+                            robot.command[:] = 0
                         leg = lows[index](robot.observation(robot.command))
-                        robot.set_transport_action(leg, np.zeros(6) if args.freeze_arm else raw[3:])
+                        previous_arm = robot.target[12:].copy()
+                        robot.set_transport_action(leg, np.zeros(6) if args.freeze_arm else raw[3:], contract, settling)
+                        arm_offset_max[index] = max(arm_offset_max[index], np.max(np.abs(robot.target[12:] - robot.default[12:])))
+                        arm_speed_max[index] = max(arm_speed_max[index], np.max(np.abs(robot.target[12:] - previous_arm)) / .02)
                         state = final_status[index]
                         trace.writerow([float(data.time), index, *reference, *raw[:3], *robot.command,
                                         *state["actual_vx_vy_wz"], state["tilt_deg"], state["grasp_error_m"],
-                                        *external[[0, 1, 5]], *observed])
+                                        *external[[0, 1, 5]], *observed, *robot.target[12:]])
                     controls += 1
                     if controls == 1 or controls % 50 == 0:
                         displacement = data.xpos[demo.payload] - initial_payload
@@ -460,6 +490,9 @@ def main():
               "command_safety_clipped_fraction": (clipped / max(controls, 1)).tolist(),
               "final_status": demo.status(), "self_collisions": args.self_collisions,
               "freeze_arm": args.freeze_arm,
+              "transport_contract": contract,
+              "max_arm_target_offset_rad": arm_offset_max.tolist(),
+              "max_arm_target_speed_rad_s": arm_speed_max.tolist(),
               "ll_policies": [{"path": str(p.path), "sha256": p.sha256} for p in lows],
               "hl_policies": [{"path": str(p.path), "sha256": p.sha256} for p in highs], "trace": str(trace_path)}
     if args.travel_distance is not None:

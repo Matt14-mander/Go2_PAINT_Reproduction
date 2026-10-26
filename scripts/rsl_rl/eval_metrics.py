@@ -71,6 +71,10 @@ class TransportEvalMetrics:
         self.has_timeouts = False
         self.saturation_counts = torch.zeros(3, device=env.device)
         self.raw_base_max = torch.zeros(3, device=env.device)
+        self.arm_target_max = torch.zeros((), device=env.device)
+        self.arm_speed_max = torch.zeros((), device=env.device)
+        self.release_squared = torch.zeros(3, device=env.device)
+        self.release_count = 0
 
     def sample(self, actions=None):
         action = self.action
@@ -86,6 +90,9 @@ class TransportEvalMetrics:
         self.saturation_counts += (command[mask].abs() > limits + 1e-6).sum(0)
         self.raw_base_max = torch.maximum(self.raw_base_max, command[mask].abs().max(0).values)
         command = command.clamp(-limits, limits)
+        settle = getattr(action.cfg, "settle_seconds", 0.)
+        if settle > 0:
+            command[self.env.episode_length_buf * self.env.step_dt < settle] = 0
         command = torch.where(command.abs() < action.cfg.command_deadband, 0., command)[mask]
         velocity = torch.cat((data.root_lin_vel_b[:, :2], data.root_ang_vel_b[:, 2:3]), dim=-1)[mask]
         for index, values in enumerate((reference, command, velocity,
@@ -94,6 +101,18 @@ class TransportEvalMetrics:
         q = data.joint_pos[mask][:, action.arm_ids]
         self.arm_squared[0] += (q - action.arm_target[mask]).square().mean(-1).sum()
         self.arm_squared[1] += (q - data.default_joint_pos[mask][:, action.arm_ids]).square().mean(-1).sum()
+        target_offset = action.arm_target[mask] - data.default_joint_pos[mask][:, action.arm_ids]
+        self.arm_target_max = torch.maximum(self.arm_target_max, target_offset.abs().max())
+        if hasattr(action, "previous_arm_target"):
+            speed = (action.arm_target[mask] - action.previous_arm_target[mask]).abs() / self.env.step_dt
+            self.arm_speed_max = torch.maximum(self.arm_speed_max, speed.max())
+        stop_hold = getattr(action.cfg, "stop_hold_seconds", 0.)
+        if stop_hold > 0:
+            # Evaluate the final half of the explicit zero-force tail, after braking.
+            release = (self.env.episode_length_buf[mask] * self.env.step_dt >=
+                       self.env.cfg.episode_length_s - stop_hold / 2)
+            self.release_squared += velocity[release].square().sum(0)
+            self.release_count += int(release.sum())
         gravity = data.projected_gravity_b[mask]
         tilt = torch.acos((-gravity[:, 2]).clamp(-1., 1.))
         roll = torch.atan2(-gravity[:, 1], -gravity[:, 2]).abs()
@@ -115,6 +134,8 @@ class TransportEvalMetrics:
                   "ll_sha256": self.action.ll_sha256,
                   "freeze_arm": getattr(self.action.cfg, "freeze_arm", False),
                   "command_limits": list(getattr(self.action.cfg, "command_limits", (1., 1., 1.5))),
+                  "arm_max_offset_rad": getattr(self.action.cfg, "arm_max_offset", None),
+                  "arm_max_target_speed_rad_s": getattr(self.action.cfg, "arm_max_speed", None),
                   "sampling": "pre_step_excluding_reset_states; tilt maxima may miss the terminal physics step"}
         if self.count:
             values = self.sums / self.count
@@ -130,4 +151,9 @@ class TransportEvalMetrics:
                           tilt_over_45_sample_fraction=self.tilt_over_45 / self.count)
             result.update(raw_command_saturation_fraction_xyz=(self.saturation_counts / self.count).tolist(),
                           raw_command_max_abs_xyz=self.raw_base_max.tolist())
+            result.update(max_arm_target_offset_rad=float(self.arm_target_max),
+                          max_arm_target_speed_rad_s=float(self.arm_speed_max),
+                          release_samples=self.release_count,
+                          release_velocity_rmse_vx_vy_wz=(self.release_squared / self.release_count).sqrt().tolist()
+                          if self.release_count else None)
         return result

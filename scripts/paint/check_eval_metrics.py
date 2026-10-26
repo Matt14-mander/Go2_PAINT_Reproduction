@@ -14,6 +14,25 @@ spec.loader.exec_module(module)
 
 
 class MetricsTests(unittest.TestCase):
+    def test_stage2_zero_tail_is_separate_from_startup(self):
+        data = NS(root_lin_vel_b=torch.tensor([[.1, 0., 0.], [.02, 0., 0.]]),
+                  root_ang_vel_b=torch.zeros(2, 3), joint_pos=torch.zeros(2, 6),
+                  default_joint_pos=torch.zeros(2, 6),
+                  projected_gravity_b=torch.tensor([[0., 0., -1.], [0., 0., -1.]]))
+        action = NS(robot=NS(data=data), arm_ids=list(range(6)), arm_target=torch.full((2, 6), .004),
+                    previous_arm_target=torch.zeros(2, 6), reference=lambda: torch.zeros(2, 3),
+                    ll_sha256="test", cfg=NS(command_deadband=.05, command_limits=(.35, .35, .4),
+                                            settle_seconds=1., stop_hold_seconds=3.))
+        env = NS(action_manager=NS(get_term=lambda _: action), device="cpu", step_dt=.02,
+                 episode_length_buf=torch.tensor([10, 700]), cfg=NS(episode_length_s=15.))
+        metric = module.TransportEvalMetrics(env)
+        metric.sample(torch.full((2, 9), .2))
+        result = metric.summary()
+        self.assertEqual(result["release_samples"], 1)
+        self.assertAlmostEqual(result["release_velocity_rmse_vx_vy_wz"][0], .02, places=6)
+        self.assertAlmostEqual(result["max_arm_target_speed_rad_s"], .2, places=6)
+        torch.testing.assert_close(torch.tensor(result["mean_teacher_command_vx_vy_wz"]), torch.full((3,), .1))
+
     def test_transport_separates_teacher_mapping_from_motion_and_records_falls(self):
         data = NS(root_lin_vel_b=torch.tensor([[.1, 0., 0.], [99., 0., 0.]]),
                   root_ang_vel_b=torch.zeros(2, 3), joint_pos=torch.full((2, 6), .2),

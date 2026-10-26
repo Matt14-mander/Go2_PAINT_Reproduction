@@ -50,6 +50,10 @@ class CheckpointTests(unittest.TestCase):
 
     def test_export_only_has_checkpoint_provenance_and_never_rolls_out(self):
         context, env_cfg, agent = self.make_context()
+        context["args_cli"].task = "GO2-PIPER-PAINT-Transport-Flat-Stage2"
+        env_cfg.actions = SimpleNamespace(transport=SimpleNamespace(
+            freeze_arm=False, command_limits=(.35, .35, .4), arm_scale=.1, arm_max_offset=.1,
+            arm_max_speed=.2, settle_seconds=1., force_ramp_seconds=2., stop_hold_seconds=3., command_deadband=.05))
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             checkpoint = root / "model_9999.pt"
@@ -60,7 +64,7 @@ class CheckpointTests(unittest.TestCase):
             context["args_cli"].export_dir = str(output)
             agent.device, agent.class_name, agent.clip_actions = "cpu", "OnPolicyRunner", None
             agent.to_dict = lambda: {}
-            env = SimpleNamespace(unwrapped=SimpleNamespace(device="cpu"), close=Mock(),
+            env = SimpleNamespace(unwrapped=SimpleNamespace(device="cpu", step_dt=.02), close=Mock(),
                                   get_observations=Mock(side_effect=AssertionError("Export must not roll out")))
             runner = Mock()
             runner.alg.policy = SimpleNamespace()
@@ -81,6 +85,9 @@ class CheckpointTests(unittest.TestCase):
             self.assertEqual(Path(manifest["checkpoint"]), checkpoint)
             self.assertEqual(manifest["checkpoint_sha256"], hashlib.sha256(b"checkpoint-fixture").hexdigest())
             self.assertEqual(manifest["policy_sha256"], hashlib.sha256(b"actor-fixture").hexdigest())
+            self.assertEqual(manifest["transport_action"]["arm_max_offset"], .1)
+            self.assertEqual(manifest["transport_action"]["control_dt"], .02)
+            self.assertFalse(manifest["transport_action"]["freeze_arm"])
 
     def make_context(self, checkpoint="/weights/model_9999.pt", pretrained=False):
         args = SimpleNamespace(task="GO2-PIPER-PAINT-Loco-Flat-Play", num_envs=1, device=None,

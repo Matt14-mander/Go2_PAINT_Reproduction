@@ -94,6 +94,24 @@ def termination_cost(env):
     return env.termination_manager.terminated.float()
 
 
+def arm_target_speed_cost(env):
+    action = term(env)
+    return ((action.arm_target - action.previous_arm_target) / env.step_dt).square().mean(-1)
+
+
+def arm_soft_limit_cost(env):
+    action = term(env)
+    q = action.robot.data.joint_pos[:, action.arm_ids]
+    limits = action.robot.data.soft_joint_pos_limits[:, action.arm_ids]
+    return ((limits[..., 0] - q).clamp_min(0) + (q - limits[..., 1]).clamp_min(0)).square().sum(-1)
+
+
+def payload_swing_cost(env):
+    action = term(env)
+    omega = quat_apply_inverse(action.robot.data.root_quat_w, action.payload.data.root_ang_vel_w)
+    return omega[:, :2].square().sum(-1)
+
+
 def terrain_progress(env, env_ids):
     """Use the episode wrench's speed reference; never query a velocity CommandTerm."""
     action = term(env)

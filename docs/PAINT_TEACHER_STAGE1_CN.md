@@ -140,6 +140,6 @@ python mujoco/deploy/deploy_mujoco/go2_piper/paint_cooperate.py \
   --keyboard --duration 60 --camera-azimuth 25
 ```
 
-这只是后续命令模板；应先完成Isaac中Stage1的验收。下一阶段开放小幅机械臂残差的配置本次尚未实现，不能简单去掉`--freeze-arm`就认为已经训练好了全臂策略。
+应先完成Isaac中Stage1的验收。小幅开放机械臂的下一阶段已作为独立Stage2任务实现，见 [Stage2开发与训练指南](PAINT_TEACHER_STAGE2_CN.md)。Stage1权重部署仍需`--freeze-arm`；Stage2需要单独训练并携带导出的执行配置，不能仅去掉该参数。
 
 本地已通过新旧官方RSL配置API校验、固定臂/动作限幅和奖励回归检查，以及实际RSL-RL3.0.1的两次CPU PPO更新（147/165/9，std=.1）。本机不能运行Isaac PhysX，服务器物理验证由上述smoke负责，本次未连接服务器或启动训练。

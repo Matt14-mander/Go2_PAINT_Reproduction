@@ -2,6 +2,16 @@ import gymnasium as gym
 from . import agents
 
 gym.register(
+    id="GO2-PIPER-PAINT-Transport-Flat-Stage2",
+    entry_point="LeggedManip_Lab.tasks.manager_based.leggedmanip_lab.transport_env:PaintTransportEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.transport_env_cfg:Go2PiperPaintTransportStage2EnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:Go2PiperPaintTransportStage2PPORunnerCfg",
+    },
+)
+
+gym.register(
     id="GO2-PIPER-PAINT-Transport-Flat-Stage1",
     entry_point="LeggedManip_Lab.tasks.manager_based.leggedmanip_lab.transport_env:PaintTransportEnv",
     disable_env_checker=True,

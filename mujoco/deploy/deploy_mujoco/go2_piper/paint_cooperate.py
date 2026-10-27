@@ -252,6 +252,7 @@ def main():
                         help="Default: tow-bar for leader-follow, box otherwise. Sofa/table: 1 leader + 1--3 followers")
     parser.add_argument("--force-world", nargs=3, type=float, metavar=("FX", "FY", "TZ"),
                         help="Defaults to [8,0,0] in wrench mode; [0,0,0] in velocity mode")
+    parser.add_argument("--force-period", type=float, help="Stage2 wrench mode: repeat ramp/hold/release every N seconds, without resetting robots")
     parser.add_argument("--max-speed", type=float, default=.35)
     parser.add_argument("--max-yaw-rate", type=float, default=.4)
     parser.add_argument("--formation-gain", type=float, default=.4)
@@ -295,8 +296,10 @@ def main():
             parser.error("Command limits must match the Stage2 manifest")
         args.settle_seconds = contract["settle_seconds"]
         args.ramp_seconds = contract["force_ramp_seconds"]
-        force_profile(0., args.duration, contract)
+        force_profile(0., args.duration, contract, args.force_period)
         print(f"[COOP] Stage2 execution contract loaded: {json.dumps(contract)}", flush=True)
+    if args.force_period is not None and (contract is None or args.drive != "wrench" or args.keyboard):
+        parser.error("--force-period requires a Stage2 contract, --drive wrench, and no --keyboard")
     numbers = [args.spacing, args.payload_mass, args.duration, args.max_speed, args.max_yaw_rate,
                args.formation_gain, args.camera_azimuth, args.settle_seconds, args.ramp_seconds, args.admittance_gain, args.stop_hold_seconds,
                *args.force_world, *args.command_world]
@@ -439,7 +442,7 @@ def main():
                     continue
                 external[:] = 0
                 force_request = requested if args.drive == "wrench" else np.asarray(args.force_world)
-                profile = (force_profile(data.time, args.duration, contract) if contract is not None else
+                profile = (force_profile(data.time, args.duration, contract, args.force_period) if contract is not None else
                            motion_profile(data.time, args.duration, args.settle_seconds, args.ramp_seconds))
                 external[[0, 1, 5]] = force_request * profile
                 data.xfrc_applied[:] = 0
@@ -611,6 +614,7 @@ def main():
               "follower_bias_samples": [f.bias_samples for f in followers] if args.controller == "admittance" else None,
               "travel_distance_goal_m": args.travel_distance,
               "wrench_source": args.wrench_source, "force_world_Fx_Fy_Tz": args.force_world,
+              "force_period_s": args.force_period,
               "sim_time_s": float(data.time), "wall_time_s": time.monotonic() - started, "control_steps": controls,
               "payload_displacement_world_m": (data.xpos[demo.payload] - initial_payload).tolist(),
               "max_tilt_deg": peak_tilt.tolist(), "max_grasp_error_m": peak_grasp.tolist(),

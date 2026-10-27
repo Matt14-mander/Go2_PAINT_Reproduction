@@ -73,7 +73,7 @@ class CooperativeChecks(unittest.TestCase):
             stage2_report = root / "stage2.json"
             result = subprocess.run([sys.executable, str(ENTRY / "paint_cooperate.py"),
                 "--ll-policy", str(root / "ll.pt"), "--controller", "teacher", "--hl-policy", str(root / "hl.pt"),
-                "--require-stage2-contract", "--headless", "--duration", "9", "--force-world", "0", "0", "0",
+                "--require-stage2-contract", "--headless", "--duration", "9", "--force-period", "9", "--force-world", "0", "0", "0",
                 "--report", str(stage2_report)], capture_output=True, text=True, timeout=60)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             summary = json.loads(stage2_report.read_text())

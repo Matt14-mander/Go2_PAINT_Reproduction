@@ -45,8 +45,15 @@ def arm_target(raw, default, limits, previous, contract):
     return previous + np.clip(desired - previous, -delta, delta)
 
 
-def force_profile(time, duration, contract):
+def force_profile(time, duration, contract, period=None):
     settle, ramp, stop = (contract[k] for k in ("settle_seconds", "force_ramp_seconds", "stop_hold_seconds"))
     if duration <= settle + 2 * ramp + stop:
         raise ValueError("Duration must include startup, force ramps, and a zero-force tail")
-    return float(np.clip(min((time - settle) / ramp, (duration - stop - time) / ramp), 0., 1.))
+    envelope = float(np.clip(min((time - settle) / ramp, (duration - stop - time) / ramp), 0., 1.))
+    if period is None:
+        return envelope
+    if not np.isfinite(period) or not settle + 2 * ramp + stop < period <= duration:
+        raise ValueError("Force period must include startup, ramps, hold and zero tail, and be <= duration")
+    phase = time % period
+    pulse = float(np.clip(min((phase - settle) / ramp, (period - stop - phase) / ramp), 0., 1.))
+    return min(envelope, pulse)

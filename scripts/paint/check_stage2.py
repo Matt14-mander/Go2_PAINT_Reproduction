@@ -80,6 +80,17 @@ class Stage2Checks(unittest.TestCase):
         torch.testing.assert_close(math.wrench_profile(time, 15., 1., 2., 3.), expected)
         np.testing.assert_allclose([force_profile(float(t), 15., CONTRACT) for t in time], expected.numpy())
 
+    def test_repeated_force_has_four_release_windows_without_reset(self):
+        for origin in (0., 15., 30., 45.):
+            for offset, expected in ((0., 0.), (1., 0.), (2., .5), (3., 1.),
+                                     (10., 1.), (11., .5), (12., 0.), (14.9, 0.)):
+                self.assertAlmostEqual(force_profile(origin + offset, 60., CONTRACT, 15.), expected)
+        # A partial final pulse still ends with a full zero-force tail.
+        self.assertEqual(force_profile(33., 35., CONTRACT, 15.), 0.)
+        for period in (0., 8., 61., float('nan')):
+            with self.assertRaises(ValueError):
+                force_profile(0., 60., CONTRACT, period)
+
     def test_manifest_requires_matching_policy_and_complete_contract(self):
         with tempfile.TemporaryDirectory() as directory:
             policy = Path(directory) / "policy.pt"

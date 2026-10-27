@@ -100,6 +100,24 @@ python mujoco/deploy/deploy_mujoco/go2_piper/paint_cooperate.py \
 
 与Stage1使用同样外力比较，并另做零力测试。grasp日志用于比较内部拉扯、受力峰值和波动；当前版本仍不宣称teacher可直接用原始grasp反力闭环。后续intent estimator/student尚未实现。
 
+## 批量teacher验收
+
+新增 `scripts/paint/accept_teacher_stage2.sh`，需与最新 `paint_cooperate.py` 和 `transport_contract.py` 一起同步。脚本仅评估，不训练，默认使用本轮Stage2 run和原Flat LL，默认打开窗口、不录制。
+
+```bash
+conda activate limx
+cd ~/workspace/Go2_PAINT_Reproduction
+BASE="$PWD/logs/teacher_stage2_acceptance/$(date +%Y%m%d_%H%M%S)"
+OUT="$BASE/mujoco" bash scripts/paint/accept_teacher_stage2.sh mujoco
+OUT="$BASE/isaac" DEVICE=cuda:1 bash scripts/paint/accept_teacher_stage2.sh isaac
+```
+
+MuJoCo依次运行5项，每项60秒：总外力Fy=+16/-16 N、总Tz=+2/-2 Nm、Fx=16 N重复施加/撤去。重复项用新增 `--force-period 15`：每15秒依次1秒零力、2秒渐增、7秒保持、2秒渐减、3秒零力；60秒4个周期，机器人连续运行，不reset。普通方向项仍为一次施力并在末尾撤力。初次验收不启用keyboard，以便复现。
+
+Isaac交叉测试seed=42/43/44、payload=0.25/0.5/1.0 kg、受力/零力，共18项，每项4环境45秒仿真时间；只改变种子、固定负载和外力尺度，其余沿用Stage2条件。0.25/1.0 kg属于训练固定0.5 kg之外的泛化测试，失败应单独记录。MuJoCo没有随机初始化入口，不用虚假的seed参数重复同一确定性场景。Isaac默认取消CUDA屏蔽，`DEVICE=cuda:1` 指实际CUDA编号；选择资源足够的卡。
+
+每项stdout与JSON保存在对应OUT目录（Isaac原始报告仍在run/evaluations，另复制一份到OUT）。失败会记录并继续其余项，整批最后返回非零；`completed`只表示程序运行完成，不能替代质量验收。检查各方向运动是否正确、限幅比例、倾角、抓取误差、零力与撤力后速度，以及不同种子/负载的异常重置。MuJoCo重复撤力的全过程见CSV，单个最终状态不能代表所有周期都停稳。
+
 ## 验证边界
 
 本地检查覆盖Tensor动作限幅/限速、启动与撤力时序、NumPy部署与训练计算一致性、真实RSL-RL3.0.1迁移及两次CPU PPO更新、正常resume保留臂输出、真实MuJoCo加载带metadata假策略并执行臂限幅。这里只验证接口与数值行为，不证明真实策略收敛；Isaac PhysX smoke与新训练需在服务器运行。

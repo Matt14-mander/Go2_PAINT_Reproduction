@@ -128,7 +128,7 @@ MUJOCO_GL=egl python mujoco/deploy/deploy_mujoco/go2_piper/paint_loco.py \
 这里的 187 个相同高度值是平面几何计算结果，不是任意填零。此入口只支持当前 Flat 场景；台阶、斜坡或障碍物必须实现对应射线扫描，不能沿用该高度公式。
 不能直接使用之前设计的 235 维 `PaintLocoInterface` 去加载当前 247 维权重。
 
-Isaac USD 与现有 MuJoCo XML 的惯性、接触和限位不保证完全相同，XML 的电机力矩范围也未逐项与训练 USD 比对。
+Isaac USD 与现有 MuJoCo XML 的惯性、接触和限位不保证完全相同。编译后的力矩范围和源USD比对结果见第10节。
 本入口只复现标称控制设置；不复现训练随机摩擦、增益、质心、推扰。默认执行器延迟为 0，可在 YAML 中设 `delay_steps=1..4` 做后续测试。
 应以 run 下 `params/env.yaml` 为训练真值；如果训练时改过默认姿态、kp/kd、动作尺度或 dt，先更新新 YAML 再测试。
 基线通过后，可尝试固定 `--payload-mass 1`，它在末端增加等效质量/球体惯量，不是共享物体抓握模型。
@@ -139,3 +139,76 @@ Isaac USD 与现有 MuJoCo XML 的惯性、接触和限位不保证完全相同�
 没有获取服务器的真实训练权重，因此不声称真实策略已经完成 sim-to-sim 迁移。实际结果以服务器的 stand/forward 报告及视频为准。
 
 参考：[MuJoCo Python bindings](https://mujoco.readthedocs.io/en/stable/python.html)、[mj_objectVelocity](https://mujoco.readthedocs.io/en/stable/APIreference/APIfunctions.html#mj-objectvelocity)、[Isaac Lab root state frame semantics](https://github.com/isaac-sim/IsaacLab/blob/v2.3.0/source/isaaclab/isaaclab/assets/articulation/articulation_data.py)。
+
+## 10. 转向退化后的执行一致性核对
+
+接口检查未发现canonical关节顺序或动作尺度错位。实际训练的247维包含18关节位置、18关节速度，不能依据旧235维注释重写接口。观测使用基座link轴下的CoM速度、重力；动作q0+0.25*clip(a,-4,4)；腿部PD30/0.6；dt=.005、decimation=4。
+
+已确认的差异：
+
+| 项目 | Isaac源配置/USD | 编译后MuJoCo |
+|---|---|---|
+| 腿部力矩上限 | hip/thigh23.7、calf45.43 Nm | 相同。XML默认knee35.5被末尾motor45.43覆盖，必须检查编译模型 |
+| 机械臂力矩上限 | 源USD每轴100 Nm；运行时仍需确认 | 20/20/15/7/5/5 Nm |
+| 质量 | 源USD显式正质量合计约20.765 kg | 约19.11895 kg |
+| 部分质量例子 | base7.287、link0约1.02 kg | base_link6.921、Piper约.16255 kg |
+| 足接触 | PhysX参数需现场读取，不能直接等同MuJoCo | 足geom priority1、condim6、friction[.8,.02,.01] |
+| 标称评估延迟 | 原Loco名义评估漏清0..4物理步，本次已修正为0 | delay_steps0 |
+
+质量含固定连杆合并、自动质量等差异，源USD合计不是对服务器实际PhysX总质量的测量；惯量的主轴及body坐标系也不同，禁止直接拷贝三项对角线。关节friction参数跨引擎的含义同样不能仅按数值等同。
+
+足geom优先级高于地面，所以实际摩擦向量由足端提供；只修改地面friction不能消除足端扭转/滚动约束。`point-contact`仅把四足condim改为3、保留切向摩擦，作为隔离变量的A/B，不宣称完整复现PhysX。参考 [MuJoCo contact parameter rules](https://mujoco.readthedocs.io/en/3.2.7/modeling.html#contact-parameters)。
+
+### 同步和现场接口快照
+
+同步最新 `scripts/rsl_rl/`、`scripts/paint/audit_mujoco_interface.py` 和 `mujoco/deploy/deploy_mujoco/go2_piper/`。新模块 `physics_audit.py` 与参考数据 `isaac_asset_reference.json` 必须同步。默认profile保持legacy，已有模型和teacher基线没有自动切换。训练奖励和模型资产未改动。
+
+```bash
+conda activate limx
+cd ~/workspace/Go2_PAINT_Reproduction
+export PYTHONPATH="$PWD/.runtime/rsl_rl_3_0_1${PYTHONPATH:+:$PYTHONPATH}"
+unset CUDA_VISIBLE_DEVICES
+FLAT_RUN="$PWD/logs/rsl_rl/go2_piper_paint_loco/2026-10-24_18-05-41_train_flat_20261024_180532_13553c07"
+LL="$FLAT_RUN/exported/policy.pt"
+mkdir -p logs/mujoco
+
+python -u scripts/rsl_rl/play.py \
+  --task GO2-PIPER-PAINT-Loco-Flat-Play \
+  --checkpoint "$FLAT_RUN/model_9999.pt" --device cuda:1 --num_envs 1 --seed 42 \
+  --base-command 0 0 0.3 --payload-mass 0 --no-disturbances --no-domain-randomization \
+  --export-only --export-dir "$FLAT_RUN/exported/interface_audit" \
+  --interface-snapshot logs/mujoco/isaac_interface.json \
+  --headless --kit_args="--/renderer/multiGpu/enabled=false"
+
+python scripts/paint/audit_mujoco_interface.py \
+  --policy "$LL" --compare-policy "$FLAT_RUN/exported/interface_audit/policy.pt" \
+  --snapshot logs/mujoco/isaac_interface.json \
+  --report logs/mujoco/interface_audit.json
+```
+
+这是一次无窗口、无rollout的参数/策略导出，不是视频测试。现场快照记录真实关节顺序、姿态和速度、247维观测、动作、执行器增益/上限、延迟、质量/惯量与材料数据及checkpoint来源。MuJoCo重放同一状态后分块比较观测，并检查导出策略在原始Isaac观测上的动作，区分导出错误与观测重建差异。此重放仅支持Flat平面，不能拿rough快照验证187条真实地形射线。
+
+`state_dict_exactly_equal=true`和`max_abs_output_difference=0`支持新旧导出权重一致；序列化SHA不同本身不代表权重不同。`export_vs_native_action_max_abs_difference`与观测分块差异应接近数值精度；若动作相同而运动轨迹不同，优先排查动力学。现场快照只读取env0，不能替代多种子轨迹验收。
+
+参考JSON来源SHA若不匹配会在报告中列出，不要用过期源参数当服务器真值。只有要更新本地USD参考时才执行 `python scripts/paint/audit_mujoco_interface.py --refresh-reference`（需要pxr）；常规服务器检查无需安装usd-core。
+
+### 相同权重的MuJoCo A/B
+
+```bash
+OUT="$PWD/logs/mujoco/yaw_ab_$(date +%Y%m%d_%H%M%S)"
+mkdir -p "$OUT"
+for PROFILE in legacy point-contact arm-effort-100 point-contact-arm100; do
+  for WZ in 0.3 -0.3; do
+    python -u mujoco/deploy/deploy_mujoco/go2_piper/paint_loco.py \
+      --policy "$LL" --command 0 0 "$WZ" --duration 30 --payload-mass 0 \
+      --physics-profile "$PROFILE" --trace \
+      --report "$OUT/${PROFILE}_yaw_${WZ}.json"
+  done
+done
+```
+
+默认打开窗口、不录制。legacy是原基线；point-contact只变接触维数；arm-effort-100只变6个机械臂电机上限；point-contact-arm100组合两者。先看是否改善±.3跟踪，再复测±.1、站稳和直行。不要只因单项yaw改善就更换全部协同搬运实验的默认物理。
+
+每份报告包含权重SHA和编译后的execution参数，`--trace`另保存`.trace.npz`，包括247维输入、12动作、18关节目标/实际位置/速度，以及前一物理步的执行力矩。后者明确是pre-step已有执行值，不是当前新动作对应的即时输出。NPZ可用于诊断限矩和动作振荡。
+
+协同入口也支持同名 `--physics-profile`，但应在单机隔离变量对照完成后再使用。机械臂上限100 Nm仅用于仿真源参数对照，不是实机电机额定力矩声明。

@@ -10,6 +10,7 @@ from collections import deque
 from contextlib import nullcontext
 from datetime import datetime
 import json
+import hashlib
 from pathlib import Path
 import time
 
@@ -17,6 +18,7 @@ import mujoco
 import numpy as np
 import torch
 import yaml
+from physics_audit import PROFILES, apply_profile, describe_model
 
 MUJOCO_ROOT = Path(__file__).resolve().parents[3]
 LEG_NAMES = [f"{leg}_{part}_joint" for leg in ("FR", "FL", "RR", "RL") for part in ("hip", "thigh", "calf")]
@@ -67,6 +69,7 @@ class PaintBridge:
         self.gear = self.model.actuator_gear[self.actuator_ids, 0].copy()
         if np.any(self.gear == 0):
             raise ValueError("Zero motor gear")
+        apply_profile(self.model, self.joint_ids, self.actuator_ids, cfg.get("physics_profile", "legacy"))
         self.default = np.asarray(cfg["default_joint_pos"], dtype=np.float64)
         self.kp = np.asarray(cfg["kp"], dtype=np.float64)
         self.kd = np.asarray(cfg["kd"], dtype=np.float64)
@@ -162,6 +165,8 @@ def main():
     parser.add_argument("--video", type=Path, help="Optional MP4 output; EGL/OSMesa needed on a headless Linux server")
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--report", type=Path)
+    parser.add_argument("--physics-profile", choices=PROFILES, default="legacy", help="Explicit A/B; default preserves the validated model")
+    parser.add_argument("--trace", action="store_true", help="Save control-step observations, actions and joint states as NPZ")
     parser.add_argument("--check-only", action="store_true", help="Load XML and policy; check actual 247 -> 12 I/O, no rollout")
     args = parser.parse_args()
     command = np.asarray(args.command)
@@ -170,13 +175,15 @@ def main():
     if not np.isfinite(args.duration) or args.duration <= 0 or args.fps <= 0:
         parser.error("duration/fps must be positive")
     cfg = yaml.safe_load(args.config.read_text(encoding="utf-8"))
+    cfg["physics_profile"] = args.physics_profile
     bridge = PaintBridge(cfg, args.payload_mass)
     torch.set_num_threads(1)
     with args.policy.expanduser().open("rb") as stream:
         policy = torch.jit.load(stream, map_location="cpu").eval()
     def infer():
+        bridge.last_observation = bridge.observation(command)
         with torch.inference_mode():
-            output = policy(torch.from_numpy(bridge.observation(command)).unsqueeze(0))
+            output = policy(torch.from_numpy(bridge.last_observation).unsqueeze(0))
         if not isinstance(output, torch.Tensor) or output.shape != (1, 12):
             raise ValueError("Policy must accept (1,247) and return a (1,12) tensor")
         if not torch.isfinite(output).all():
@@ -202,6 +209,7 @@ def main():
     arm_max = 0.0
     report_path = args.report or (MUJOCO_ROOT.parent / "logs/mujoco" / f"paint_{datetime.now():%Y%m%d_%H%M%S_%f}.json")
     started = time.monotonic()
+    trace = {key: [] for key in ("time_s", "observation", "action", "target", "joint_pos", "joint_vel", "previous_applied_torque")}
     try:
         if args.video:
             import imageio.v2 as imageio
@@ -223,6 +231,14 @@ def main():
                     break
                 if physical_step % decimation == 0:
                     bridge.set_action(infer())
+                    if args.trace:
+                        for key, value in {
+                            "time_s": bridge.data.time, "observation": bridge.last_observation,
+                            "action": bridge.previous_action, "target": bridge.target,
+                            "joint_pos": bridge.data.qpos[bridge.qpos_ids], "joint_vel": bridge.data.qvel[bridge.qvel_ids],
+                            "previous_applied_torque": bridge.data.actuator_force[bridge.actuator_ids] * bridge.gear,
+                        }.items():
+                            trace[key].append(np.array(value, copy=True))
                     linear, angular, gravity = bridge.base_state()
                     actual = np.array([linear[0], linear[1], angular[2]])
                     errors += (actual - command)**2
@@ -259,6 +275,8 @@ def main():
         if renderer is not None:
             renderer.close()
     report = {"reason": reason, "policy": str(args.policy.resolve()), "observations": 247, "actions": 12,
+              "policy_sha256": hashlib.sha256(args.policy.expanduser().read_bytes()).hexdigest(),
+              "execution": describe_model(bridge),
               "sim_time_s": float(bridge.data.time), "wall_time_s": time.monotonic() - started,
               "control_steps": steps, "command": command.tolist(), "payload_mass_kg": args.payload_mass,
               "mean_actual_vx_vy_wz": (velocities / max(steps, 1)).tolist(),
@@ -266,6 +284,10 @@ def main():
               "arm_joint_rmse_rad": float(np.sqrt(arm_error_sum / max(steps, 1))),
               "arm_joint_max_abs_error_rad": arm_max}
     report_path.parent.mkdir(parents=True, exist_ok=True)
+    if args.trace:
+        trace_path = report_path.with_suffix(".trace.npz")
+        np.savez_compressed(trace_path, **{key: np.asarray(value) for key, value in trace.items()})
+        report["trace"] = str(trace_path)
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"[MuJoCo] {json.dumps(report)}\n[MuJoCo] Report: {report_path}", flush=True)
     return 0 if reason in ("completed", "viewer_closed") else 2

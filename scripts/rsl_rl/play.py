@@ -38,6 +38,7 @@ parser.add_argument("--video_length", type=int, default=200, help="Length of the
 parser.add_argument("--export-only", action="store_true", help="Load checkpoint, export actor, and exit without a rollout")
 parser.add_argument("--export-dir", type=str, help="Explicit actor export directory, e.g. exported/model_9999")
 parser.add_argument("--eval-steps", type=int, help="Stop after N control steps, also in a desktop window without recording")
+parser.add_argument("--interface-snapshot", type=str, help="Save initialized live Loco 247->12 interface and actuator/body parameters")
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
@@ -253,6 +254,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     with open(os.path.join(export_model_dir, "manifest.json"), "w", encoding="utf-8") as stream:
         json.dump(manifest, stream, indent=2)
     print(f"[EVAL] Policy export finished: {export_model_dir}", flush=True)
+    if args_cli.interface_snapshot:
+        if "GO2-PIPER-PAINT-Loco-" not in args_cli.task:
+            raise ValueError("--interface-snapshot currently requires a PAINT Loco task")
+        from interface_snapshot import save_interface_snapshot
+        save_interface_snapshot(env, env.get_observations(), policy, args_cli.interface_snapshot, manifest)
     if args_cli.export_only:
         env.close()
         print("[EVAL] Export-only completed; no policy rollout performed.", flush=True)

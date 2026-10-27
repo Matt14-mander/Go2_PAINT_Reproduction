@@ -28,6 +28,7 @@ from cooperative_control import DesktopCommand, WrenchFollower, leader_action, m
 from cooperative_visuals import draw_guidance, draw_leader_follow
 from grasp_audit import GraspAudit, normalized_input, payload_balance
 from transport_contract import load_stage2_contract, arm_target, force_profile
+from physics_audit import PROFILES, apply_profile, describe_model
 from paint_loco import JOINT_NAMES, MUJOCO_ROOT, PaintBridge, named_id
 
 
@@ -89,6 +90,7 @@ class RobotBridge(PaintBridge):
         model.dof_damping[self.qvel_ids] = 0
         model.dof_armature[self.qvel_ids] = .01
         model.dof_frictionloss[self.qvel_ids] = .01
+        apply_profile(model, self.joint_ids, self.actuator_ids, cfg.get("physics_profile", "legacy"), self.prefix)
 
     def push_history(self):
         frame = np.concatenate((self.data.qpos[self.qpos_ids[12:]] - self.default[12:],
@@ -227,6 +229,7 @@ def policy_paths(paths, count, label):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path(__file__).with_name("paint_loco.yaml"))
+    parser.add_argument("--physics-profile", choices=PROFILES, default="legacy")
     parser.add_argument("--ll-policy", type=Path, nargs="+", required=True)
     parser.add_argument("--hl-policy", type=Path, nargs="+", default=[])
     parser.add_argument("--controller", choices=("reference", "admittance", "teacher"),
@@ -329,6 +332,7 @@ def main():
     if np.any(np.abs(args.command_world) > [args.max_speed, args.max_speed, args.max_yaw_rate]) and velocity_drive:
         parser.error("World command exceeds max-speed/max-yaw-rate")
     cfg = yaml.safe_load(args.config.read_text(encoding="utf-8"))
+    cfg["physics_profile"] = args.physics_profile
     if int(cfg["control_decimation"]) != 4 or float(cfg["simulation_dt"]) != .005:
         parser.error("Current deployment contract is 200Hz physics / 50Hz control")
     if int(cfg["delay_steps"]) != 0 or float(cfg["initial_base_height"]) != .35:
@@ -622,6 +626,7 @@ def main():
               "final_status": demo.status(), "self_collisions": args.self_collisions,
               "freeze_arm": args.freeze_arm or leader_follow,
               "transport_contract": contract,
+              "execution": [describe_model(robot, robot.prefix) for robot in demo.robots],
               "max_arm_target_offset_rad": arm_offset_max.tolist(),
               "max_arm_target_speed_rad_s": arm_speed_max.tolist(),
               "ll_policies": [{"path": str(p.path), "sha256": p.sha256} for p in lows],

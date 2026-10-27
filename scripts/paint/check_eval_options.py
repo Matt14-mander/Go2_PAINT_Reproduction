@@ -27,7 +27,8 @@ def configuration():
                   reset_base=NS(params={"pose_range": {"x": (-0.5, 0.5), "yaw": (-3.14, 3.14)},
                                         "velocity_range": {"x": (0, 0)}})),
         observations=NS(policy=NS(enable_corruption=False, joint_pos_width=18, joint_vel_width=18)),
-        actions=NS(joint_pos=NS(action_dim=12)))
+        actions=NS(joint_pos=NS(action_dim=12)),
+        scene=NS(robot=NS(actuators={"legs": NS(min_delay=0, max_delay=4)})))
 
 
 def arguments(**kwargs):
@@ -91,6 +92,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(cfg.events.reset_base.params["pose_range"]["yaw"], (0, 0))
         self.assertEqual(cfg.observations, observation_before)
         self.assertEqual(cfg.actions, action_before)
+        self.assertEqual(cfg.scene.robot.actuators["legs"].max_delay, 0)
 
     def test_invalid_inputs_are_rejected(self):
         for values in ({"payload_mass": -1}, {"payload_mass": float("nan")},

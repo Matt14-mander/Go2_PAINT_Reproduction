@@ -91,7 +91,8 @@ class CheckpointTests(unittest.TestCase):
 
     def make_context(self, checkpoint="/weights/model_9999.pt", pretrained=False):
         args = SimpleNamespace(task="GO2-PIPER-PAINT-Loco-Flat-Play", num_envs=1, device=None,
-                               use_pretrained_checkpoint=pretrained, checkpoint=checkpoint, video=False, eval_name="play")
+                               use_pretrained_checkpoint=pretrained, checkpoint=checkpoint, video=False, eval_name="play",
+                               interface_snapshot=None)
         env = SimpleNamespace(scene=SimpleNamespace(num_envs=1), sim=SimpleNamespace(device="cpu"))
         agent = SimpleNamespace(seed=42, experiment_name="go2_piper_paint_loco",
                                 load_run="run", load_checkpoint="model_9999.pt")

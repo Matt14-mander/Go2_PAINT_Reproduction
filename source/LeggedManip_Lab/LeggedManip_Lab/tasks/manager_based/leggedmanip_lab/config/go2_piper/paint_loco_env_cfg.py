@@ -26,7 +26,7 @@ from ...mdp.paint_locomotion import (
 
 @configclass
 class PaintLocoPolicyCfg(ObsGroup):
-    """Stable, single-frame 235-D actor interface (48 proprioceptive + 187 rays)."""
+    """Trained single-frame 247-D interface (includes all 18 joint states)."""
 
     base_lin_vel = ObsTerm(func=mdp.base_lin_vel, scale=2.0)
     base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.2, noise=Unoise(n_min=-0.2, n_max=0.2))

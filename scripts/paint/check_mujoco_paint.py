@@ -3,12 +3,14 @@
 import importlib.util
 from pathlib import Path
 import unittest
+import sys
 
 import mujoco
 import numpy as np
 import yaml
 
 PATH = Path(__file__).resolve().parents[2] / "mujoco/deploy/deploy_mujoco/go2_piper/paint_loco.py"
+sys.path.insert(0, str(PATH.parent))
 spec = importlib.util.spec_from_file_location("paint_mujoco", PATH)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)

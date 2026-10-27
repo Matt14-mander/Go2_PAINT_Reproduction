@@ -56,6 +56,11 @@ def configure_evaluation(cfg, args):
             cfg.wrench_scale = 0.0
             cfg.periodic_disturbance = False
     if nominal:
+        # Nominal must mean zero lag for Loco too; previously only Transport
+        # disabled the inherited DelayedPDActuator's random 0..4 physics steps.
+        for actuator in cfg.scene.robot.actuators.values():
+            if hasattr(actuator, "min_delay"):
+                actuator.min_delay = actuator.max_delay = 0
         for key in ("physics_material", "add_mass", "base_com", "randomize_rigid_body_inertia", "randomize_actuator_gains"):
             if hasattr(cfg.events, key):
                 setattr(cfg.events, key, None)
@@ -63,8 +68,6 @@ def configure_evaluation(cfg, args):
             cfg.events.payload_material = None
             # This option isolates physics/initial-state randomness. Preserve
             # wrench_scale and periodic_disturbance unless explicitly overridden.
-            for actuator in cfg.scene.robot.actuators.values():
-                actuator.min_delay = actuator.max_delay = 0
         for key in ("reset_robot_joints", "reset_arm_joints"):
             term = getattr(cfg.events, key, None)
             if term is not None:

@@ -109,6 +109,87 @@ class LeaderFollowChecks(unittest.TestCase):
         quarter = np.array([[0., -1., 0.], [1., 0., 0.], [0., 0., 1.]])
         np.testing.assert_allclose(leader_action([.1, 0, .1], quarter, np.pi / 2)[:3], [0, -.1, .1], atol=1e-9)
 
+    def test_furniture_geometry_load_and_individual_reaction_balance(self):
+        for kind in ("sofa", "table"):
+            for count in (2, 3, 4):
+                demo = CooperativeDemo(self.cfg, count=count, layout="furniture", payload_kind=kind)
+                model, data = demo.model, demo.data
+                self.assertEqual(model.nu, 18 * count)
+                self.assertEqual(model.neq, count)
+                self.assertEqual(np.count_nonzero(model.jnt_type == mujoco.mjtJoint.mjJNT_FREE), count + 1)
+                self.assertAlmostEqual(model.body_mass[demo.payload], .5)
+                self.assertTrue(np.all(model.body_inertia[demo.payload] > 0))
+                self.assertEqual(data.ncon, 0)
+                self.assertTrue(all(s["grasp_error_m"] < 1e-9 for s in demo.status()))
+                equality = data.efc_type == mujoco.mjtConstraint.mjCNSTR_EQUALITY
+                np.testing.assert_allclose(data.efc_pos[equality], 0, atol=1e-9)
+                self.assertEqual(np.count_nonzero(equality), 3 + 6 * (count - 1))
+                self.assertTrue(all(data.xpos[r.base, 0] < data.xpos[demo.payload, 0] for r in demo.robots[1:]))
+                if count != 3:
+                    continue
+                for _ in range(800):
+                    for robot in demo.robots:
+                        robot.write_torques()
+                    mujoco.mj_step(model, data)
+                mujoco.mj_forward(model, data)
+                self.assertTrue(all(s["grasp_error_m"] < .005 and s["tilt_deg"] < 5 for s in demo.status()))
+                before = [grasp_reaction(model, data, r.eq, demo.payload) for r in demo.robots]
+                self.assertAlmostEqual(sum(r[2] for r in before), -.5 * 9.81, delta=.2)
+                data.xfrc_applied[demo.robots[0].base, 0] = 20
+                mujoco.mj_forward(model, data)
+                reactions = [grasp_reaction(model, data, r.eq, demo.payload) for r in demo.robots]
+                for old, new in zip(before[1:], reactions[1:]):
+                    self.assertGreater(new[0] - old[0], .1)
+                _, residual, extraction = payload_balance(model, data, demo.payload, demo.robots, reactions)
+                np.testing.assert_allclose(residual, 0, atol=1e-7)
+                np.testing.assert_allclose(extraction, 0, atol=1e-8)
+                # Removing only leader's ideal joint removes its load path to BOTH followers.
+                data.eq_active[demo.robots[0].eq] = False
+                data.xfrc_applied[:] = 0
+                mujoco.mj_forward(model, data)
+                released = [grasp_reaction(model, data, r.eq, demo.payload) for r in demo.robots[1:]]
+                data.xfrc_applied[demo.robots[0].base, 0] = 20
+                mujoco.mj_forward(model, data)
+                for robot, old in zip(demo.robots[1:], released):
+                    np.testing.assert_allclose(grasp_reaction(model, data, robot.eq, demo.payload), old, atol=1e-8)
+
+    def test_three_robot_furniture_cli_with_fixture_actors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            actor = torch.nn.Linear(247, 12)
+            with torch.no_grad():
+                actor.weight.zero_()
+                actor.bias.zero_()
+            policy = root / "fixture.pt"
+            with policy.open("wb") as stream:
+                torch.jit.save(torch.jit.trace(actor, torch.zeros(1, 247)), stream)
+            for kind in ("sofa", "table"):
+                report = root / f"{kind}.json"
+                args = [sys.executable, str(ENTRY / "paint_cooperate.py"), "--ll-policy", str(policy),
+                        "--drive", "leader-follow", "--payload", kind, "--num-robots", "3", "--headless",
+                        "--settle-seconds", "1", "--ramp-seconds", "1", "--stop-hold-seconds", "1",
+                        "--duration", "5", "--audit-grasp", "--report", str(report)]
+                if kind == "table":
+                    args.append("--follower-hold")
+                result = subprocess.run(args, capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                summary = json.loads(report.read_text())
+                self.assertEqual(summary["roles"], ["leader", "follower", "follower"])
+                self.assertEqual(summary["payload_type"], kind)
+                self.assertEqual(summary["attachment_model"], "ideal_virtual_handles")
+                self.assertEqual(summary["control_steps"], 250)
+                self.assertEqual(len(summary["follower_distance_to_leader_range_m"]), 2)
+                self.assertLess(max(summary["max_abs_payload_balance_generalized"]), 1e-7)
+                self.assertEqual(summary["follower_bias_samples"][0], 0)
+                if kind == "sofa":
+                    self.assertTrue(all(n > 0 for n in summary["follower_bias_samples"][1:]))
+                with report.with_suffix(".csv").open(newline="") as stream:
+                    rows = list(csv.DictReader(stream))
+                self.assertEqual(len(rows), 750)
+                self.assertTrue(all(float(r["payload_external_Fx"]) == 0 for r in rows))
+                if kind == "table":
+                    self.assertTrue(all(float(r["command_vx"]) == 0 for r in rows if r["role"] == "follower"))
+
     def test_profile_includes_stationary_tail_and_visuals_are_read_only(self):
         command = np.zeros(3)
         for step in range(1000):

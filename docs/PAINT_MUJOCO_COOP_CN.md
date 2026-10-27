@@ -43,6 +43,51 @@ Teacher 观测为机械臂8帧干净历史（相对角度6、速度6、上一控
 
 ## 服务器运行
 
+### 参考截图的家具搬运：中间沙发/桌子，一台leader带两台follower
+
+`--drive leader-follow --payload sofa --num-robots 3` 对应“前方一台leader、中间共享家具、后方两台并排follower”。保留原需求中的真实动力学GO2-PIPER leader，没有将截图中的人形伙伴替换成预设轨迹或外加力。`--payload table` 可切换为桌子。家具由MuJoCo方块组合，无需下载网格。
+
+接触点按演示需求简化为**理想虚拟把手**：leader后部与家具通过connect连接，各follower机械臂与家具通过weld连接，灰色短杆表示虚拟抓取延伸。暂不求解夹爪接触、摩擦闭合或机械臂IK；启动时按名义FK对齐约束，运行中不重置机器人或家具位置。家具仍是有自由关节、质量、碰撞、质心和转动惯量的共享实体，leader和各follower之间的反作用力由同一个物理世界计算。虚拟把手本身无质量、无碰撞；家具主体、机身及地面仍保留碰撞。
+
+沙发包含框架、靠背、三块坐垫、扶手和四条腿；桌子包含桌面、裙板和四条腿。质量按各实体几何体积分配，MuJoCo据此计算整体质心和惯量。`--payload-mass`默认0.5 kg是控制链路验证用的轻载代理，不代表真实家具质量；外观尺寸不会自动决定实际质量。先在轻载下验证，再逐步增加质量评估低层策略承载能力。
+
+家具模式支持 `--num-robots 2/3/4`，分别是1个leader加1/2/3个follower。家具长度随follower横向排布变化，`--spacing`为后排follower间距，默认1.2 m；前后机身中心的X方向距离固定为2 m。所有机器人朝+X，leader接收世界速度和自身航向反馈；每个follower独立标定并读取自己的反力，不接收leader指令或其他follower状态。
+
+服务器激活环境并进入仓库根目录后：
+
+```bash
+conda activate limx
+cd ~/workspace/Go2_PAINT_Reproduction
+DEMO="$PWD/mujoco/deploy/deploy_mujoco/go2_piper/paint_cooperate.py"
+LL="$PWD/logs/rsl_rl/go2_piper_paint_loco/2026-10-24_18-05-41_train_flat_20261024_180532_13553c07/exported/policy.pt"
+
+# 核对模型、初始连接、已训练247->12策略输入输出
+python "$DEMO" --ll-policy "$LL" --drive leader-follow \
+  --payload sofa --num-robots 3 --headless --check-only
+
+# 先验证真实权重下的三机静态承载
+python "$DEMO" --ll-policy "$LL" --drive leader-follow \
+  --payload sofa --num-robots 3 --command-world 0 0 0 \
+  --settle-seconds 3 --duration 15 --headless \
+  --report logs/mujoco_coop/sofa_stand.json
+
+# 桌面慢速搬运：只控制leader，两个follower各自响应家具反力
+python "$DEMO" --ll-policy "$LL" --drive leader-follow \
+  --payload sofa --num-robots 3 --payload-mass 0.5 \
+  --command-world 0.1 0 0 --max-speed 0.2 --max-yaw-rate 0.3 \
+  --settle-seconds 3 --ramp-seconds 3 --stop-hold-seconds 3 \
+  --duration 40 --keyboard --audit-grasp \
+  --report logs/mujoco_coop/sofa_follow.json
+```
+
+改成 `--payload table` 即为桌子，使用新的报告路径避免覆盖沙发结果。键盘W/S、A/D、Q/E只改leader速度，X请求平滑停车。录像时去掉 `--keyboard`，可添加 `--headless --video logs/mujoco_coop/sofa_follow.mp4`（无桌面Linux按原说明配置EGL）。对照实验可加入 `--follower-hold`，此时所有follower的速度请求为零但低层与PD仍工作。
+
+同步文件时，除了已有的四个协作模块，还必须带上新增 **`mujoco/deploy/deploy_mujoco/go2_piper/furniture_payload.py`**。原有robot网格、`paint_loco.py/yaml`、`grasp_audit.py`、`transport_contract.py`仍需保留。
+
+JSON新增 `payload_type`、`attachment_model=ideal_virtual_handles`、各follower到leader的距离范围；`roles`、策略hash、反力、标定样本数等按每台机器人记录。CSV新增 `distance_to_leader_m`，leader行为0，follower行为各自距离；旧 `base_separation_m` 继续表示r0与r1的水平距离。画面F1/F2/F3标识各follower并显示其独立vx请求和原始世界Fx，箭头为各自实际反力。
+
+本地覆盖沙发/桌子的2/3/4机场景构建，以及三机静态承载、各连接反力与动力学平衡、断开leader后两个follower的受力隔离、真实CLI与hold对照。CLI检查仍使用零动作fixture，仅验证接线/物理/日志。未取得服务器的已训练247→12策略，尚未验证真实权重下的三机行走与转弯，不能将静态截图或fixture运行作为搬运成功的证据。
+
 ### Leader–follower：前车行走，后车通过机械连接跟随
 
 新增 `--drive leader-follow`。此模式固定两台同向前后排列的 GO2-PIPER：`r0` 为前方 leader，`r1` 为后方 follower。两台均有独立自由根关节，运行独立状态的 247→12 低层 locomotion 策略；可以共享权重，也可以按 leader、follower 顺序提供两份低层权重。

@@ -5,7 +5,8 @@ cooperation result. Teacher mode consumes the exact clean 147-D transport actor
 layout. Both modes use real 247->12 LL policies and torque-controlled free robots.
 Leader-follow drive uses a velocity-controlled LL leader and a local FT
 admittance follower, mechanically coupled through a free tow bar with no applied
-guidance wrench. Teacher policies are not used in this baseline.
+guidance wrench. Sofa/table options place 1--3 followers behind shared furniture
+with ideal grip extensions. Teacher policies are not used in this baseline.
 """
 
 import argparse
@@ -62,7 +63,7 @@ class RobotBridge(PaintBridge):
         self.base = named_id(model, mujoco.mjtObj.mjOBJ_BODY, self.prefix + "base_link")
         self.ee = named_id(model, mujoco.mjtObj.mjOBJ_BODY, self.prefix + "end_effector")
         self.attachment = (named_id(model, mujoco.mjtObj.mjOBJ_BODY, self.prefix + "tow_mount")
-                           if layout == "leader-follow" and index == 0 else self.ee)
+                           if layout in ("leader-follow", "furniture") and index == 0 else self.ee)
         self.joint_ids = np.array([named_id(model, mujoco.mjtObj.mjOBJ_JOINT, self.prefix + name) for name in JOINT_NAMES])
         self.qpos_ids, self.qvel_ids = model.jnt_qposadr[self.joint_ids], model.jnt_dofadr[self.joint_ids]
         ids = []
@@ -144,9 +145,11 @@ def grasp_reaction(model, data, eq_id, payload):
 
 
 class CooperativeDemo:
-    def __init__(self, cfg, count=2, mass=.5, spacing=1.2, self_collisions=False, layout="side-by-side"):
+    def __init__(self, cfg, count=2, mass=.5, spacing=1.2, self_collisions=False, layout="side-by-side", payload_kind=None):
         self.layout = layout
-        xml, assets, self.offsets = build_scene(count, spacing, mass, cfg["simulation_dt"], layout, cfg["default_joint_pos"])
+        self.payload_kind = payload_kind or ("sofa" if layout == "furniture" else "tow-bar" if layout == "leader-follow" else "box")
+        xml, assets, self.offsets = build_scene(count, spacing, mass, cfg["simulation_dt"], layout,
+                                              cfg["default_joint_pos"], self.payload_kind)
         self.model = mujoco.MjModel.from_xml_string(xml, assets)
         self.data = mujoco.MjData(self.model)
         self.payload = initialize_scene(self.model, self.data, cfg["default_joint_pos"], self.offsets, layout)
@@ -245,6 +248,8 @@ def main():
     parser.add_argument("--num-robots", type=int, default=2)
     parser.add_argument("--spacing", type=float, default=1.2)
     parser.add_argument("--payload-mass", type=float, default=.5)
+    parser.add_argument("--payload", choices=("box", "tow-bar", "sofa", "table"),
+                        help="Default: tow-bar for leader-follow, box otherwise. Sofa/table: 1 leader + 1--3 followers")
     parser.add_argument("--force-world", nargs=3, type=float, metavar=("FX", "FY", "TZ"),
                         help="Defaults to [8,0,0] in wrench mode; [0,0,0] in velocity mode")
     parser.add_argument("--max-speed", type=float, default=.35)
@@ -263,16 +268,21 @@ def main():
     args = parser.parse_args()
     leader_follow = args.drive == "leader-follow"
     velocity_drive = args.drive in ("velocity", "leader-follow")
-    layout = "leader-follow" if leader_follow else "side-by-side"
+    args.payload = args.payload or ("tow-bar" if leader_follow else "box")
+    furniture = args.payload in ("sofa", "table")
+    layout = "furniture" if furniture else "leader-follow" if leader_follow else "side-by-side"
+    if (furniture and not leader_follow) or (not leader_follow and args.payload != "box") or (leader_follow and args.payload == "box"):
+        parser.error("Use sofa/table/tow-bar with --drive leader-follow; box with wrench/velocity")
     args.camera_azimuth = args.camera_azimuth if args.camera_azimuth is not None else (110. if leader_follow else 0.)
     args.controller = args.controller or ("admittance" if leader_follow else "reference")
     args.wrench_source = args.wrench_source or ("grasp" if leader_follow else "external-share")
     args.command_world = args.command_world if args.command_world is not None else ([.1, 0., 0.] if leader_follow else [.3, 0., 0.])
     if args.force_world is None:
         args.force_world = [8., 0., 0.] if args.drive == "wrench" else [0., 0., 0.]
-    if leader_follow and (args.num_robots != 2 or args.controller != "admittance" or args.wrench_source != "grasp"
+    if leader_follow and ((not furniture and args.num_robots != 2) or not 2 <= args.num_robots <= 4
+                          or args.controller != "admittance" or args.wrench_source != "grasp"
                           or args.hl_policy or np.any(np.asarray(args.force_world) != 0)):
-        parser.error("Leader-follow requires 2 robots, admittance, grasp reactions, no HL policy and zero external force")
+        parser.error("Leader-follow requires 2 robots for tow-bar or 2--4 for furniture, admittance, grasp reactions, no HL policy and zero external force")
     if args.follower_hold and not leader_follow:
         parser.error("--follower-hold requires --drive leader-follow")
     contract = load_stage2_contract(args.hl_policy)
@@ -320,11 +330,11 @@ def main():
         parser.error("Current deployment contract is 200Hz physics / 50Hz control")
     if int(cfg["delay_steps"]) != 0 or float(cfg["initial_base_height"]) != .35:
         parser.error("Cooperative baseline currently requires zero actuator delay and .35m initial root height")
-    demo = CooperativeDemo(cfg, args.num_robots, args.payload_mass, args.spacing, args.self_collisions, layout)
+    demo = CooperativeDemo(cfg, args.num_robots, args.payload_mass, args.spacing, args.self_collisions, layout, args.payload)
     torch.set_num_threads(1)
     lows = [TorchActor(p, 247, 12) for p in policy_paths(args.ll_policy, args.num_robots, "LL")]
     highs = [TorchActor(p, 147, 9) for p in policy_paths(args.hl_policy, args.num_robots, "HL")] if args.hl_policy else []
-    print(f"[COOP] {args.num_robots} robots, layout={layout}, one FREE payload, {demo.model.neq} attachment constraints; "
+    print(f"[COOP] {args.num_robots} robots, layout={layout}, FREE {args.payload}, {demo.model.neq} attachment constraints; "
           f"controller={args.controller}; LL=247->12; HL=147->9; wrench={args.wrench_source}", flush=True)
     if args.check_only:
         print(f"[COOP] Initial status: {json.dumps(demo.status())}", flush=True)
@@ -347,7 +357,7 @@ def main():
                          if args.drive == "wrench" else f"world velocity={args.command_world}; distance_goal={args.travel_distance}")
     print(f"[COOP] drive={args.drive}; {drive_description}", flush=True)
     if leader_follow:
-        print(f"[COOP] r0=leader LL velocity; r1=follower {'zero-command HOLD' if args.follower_hold else 'local FT admittance'}; "
+        print(f"[COOP] r0=leader LL velocity; r1..r{args.num_robots - 1}=followers {'zero-command HOLD' if args.follower_hold else 'local FT admittance'}; "
               f"no applied external wrench; final stop hold={args.stop_hold_seconds}s", flush=True)
     path = args.report or MUJOCO_ROOT.parent / f"logs/mujoco_coop/coop_{datetime.now():%Y%m%d_%H%M%S_%f}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -368,7 +378,9 @@ def main():
     peak_torque_fraction = np.zeros((args.num_robots, 2))  # legs, arms
     torque_saturated = np.zeros((args.num_robots, 2), int)
     peak_wrench = np.zeros((args.num_robots, 6))
-    separation_range = [args.spacing, args.spacing]
+    initial_separation = float(np.linalg.norm(initial_bases[0, :2] - initial_bases[1, :2]))
+    separation_range = [initial_separation, initial_separation]
+    follower_distance_range = np.repeat(np.linalg.norm(initial_bases[1:, :2] - initial_bases[0, :2], axis=1)[:, None], 2, axis=1)
     peak_balance = np.zeros(6)
     external = np.zeros(6)
     group_command = np.zeros(3)
@@ -376,13 +388,13 @@ def main():
     next_gui = 0.
     final_status = demo.status()
     warnings_before = data.warning.number.copy()
-    display_wrench = np.zeros(6)
+    display_wrenches = np.zeros((args.num_robots - 1, 6))
 
     def draw_overlay(scene):
         distance = np.linalg.norm((data.xpos[demo.payload] - initial_payload)[:2])
         if leader_follow:
             draw_leader_follow(scene, [data.xpos[r.base] for r in demo.robots],
-                               [r.command for r in demo.robots], display_wrench, distance, args.follower_hold)
+                               [r.command for r in demo.robots], display_wrenches, distance, args.follower_hold)
         else:
             draw_guidance(scene, data.xpos[demo.payload], external, distance, args.controller)
 
@@ -393,7 +405,8 @@ def main():
             renderer = mujoco.Renderer(model, height=720, width=960)
             writer = imageio.get_writer(str(args.video), fps=args.fps)
         camera = mujoco.MjvCamera()
-        camera.distance = max(3.5, args.spacing + 2.) if leader_follow else max(3., args.num_robots * 1.3)
+        camera.distance = (max(4.5, args.spacing * max(1, args.num_robots - 2) + 3.) if furniture else
+                           max(3.5, args.spacing + 2.) if leader_follow else max(3., args.num_robots * 1.3))
         camera.elevation, camera.azimuth = -25, args.camera_azimuth
         with trace_path.open("w", newline="", encoding="utf-8") as stream, \
                 (audit_path.open("w", newline="", encoding="utf-8") if args.audit_grasp else nullcontext(None)) as audit_stream, \
@@ -411,6 +424,7 @@ def main():
                             "input_wrench_world_Tx", "input_wrench_world_Ty", "input_wrench_world_Tz",
                             *[f"arm_target_joint{i}_rad" for i in range(1, 7)],
                             "role", "base_world_x", "base_world_y", "base_world_z", "base_separation_m",
+                            "distance_to_leader_m",
                             "leg_torque_limit_fraction", "arm_torque_limit_fraction"])
             step = 0
             while step < int(round(args.duration / model.opt.timestep)):
@@ -444,6 +458,10 @@ def main():
                     final_status = demo.status()
                     separation = float(np.linalg.norm(data.xpos[demo.robots[0].base, :2] - data.xpos[demo.robots[1].base, :2]))
                     separation_range = [min(separation_range[0], separation), max(separation_range[1], separation)]
+                    distances = np.linalg.norm(np.array([data.xpos[r.base, :2] for r in demo.robots[1:]])
+                                               - data.xpos[demo.robots[0].base, :2], axis=1)
+                    follower_distance_range[:, 0] = np.minimum(follower_distance_range[:, 0], distances)
+                    follower_distance_range[:, 1] = np.maximum(follower_distance_range[:, 1], distances)
                     for index, robot in enumerate(demo.robots):
                         state = final_status[index]
                         peak_tilt[index] = max(peak_tilt[index], state["tilt_deg"])
@@ -466,8 +484,8 @@ def main():
                             robot.push_history()
                         observed = demo.observed_world_wrench(robot, external, args.wrench_source)
                         reference = normalized_input(observed, data.xmat[robot.base].reshape(3, 3))[1].astype(np.float32)
-                        if leader_follow and index == 1:
-                            display_wrench[:] = observed
+                        if leader_follow and index > 0:
+                            display_wrenches[index - 1] = observed
                         peak_wrench[index] = np.maximum(peak_wrench[index], np.abs(observed))
                         if leader_follow and index == 0:
                             raw = leader_action(group_command, data.xmat[robot.base].reshape(3, 3), heading_target)
@@ -516,7 +534,7 @@ def main():
                         trace.writerow([float(data.time), index, *reference, *raw[:3], *robot.command,
                                         *state["actual_vx_vy_wz"], state["tilt_deg"], state["grasp_error_m"],
                                         *external[[0, 1, 5]], *observed, *robot.target[12:], role,
-                                        *data.xpos[robot.base], separation, *effort])
+                                        *data.xpos[robot.base], separation, 0. if index == 0 else distances[index - 1], *effort])
                     controls += 1
                     if controls == 1 or controls % 50 == 0:
                         displacement = data.xpos[demo.payload] - initial_payload
@@ -527,9 +545,9 @@ def main():
                               f"actual_body={mean_actual.round(2)} tilt={peak_tilt.round(1)} grasp={peak_grasp.round(4)}", flush=True)
                         if leader_follow:
                             print(f"[LEADER-FOLLOW] leader_cmd={demo.robots[0].command.round(3)} "
-                                  f"follower_cmd={demo.robots[1].command.round(3)} "
+                                  f"follower_cmd={[r.command.round(3).tolist() for r in demo.robots[1:]]} "
                                   f"actual={np.round([s['actual_vx_vy_wz'] for s in final_status], 3).tolist()} "
-                                  f"follower_Fxy={display_wrench[:2].round(2)}N separation={separation:.3f}m", flush=True)
+                                  f"follower_Fxy={display_wrenches[:, :2].round(2).tolist()}N separation={distances.round(3)}m", flush=True)
                 for robot in demo.robots:
                     robot.write_torques()
                 before = data.time
@@ -570,14 +588,17 @@ def main():
                 reason = f"robot_{index}_grasp_error"
     report = {"reason": reason, "controller": args.controller, "robots": args.num_robots, "payload_mass_kg": args.payload_mass,
               "drive": args.drive, "layout": layout,
+              "payload_type": args.payload,
+              "attachment_model": "ideal_virtual_handles" if furniture else "rear_ball_hitch" if leader_follow else "EE_welds",
               "command_world_vx_vy_wz": args.command_world if velocity_drive else None,
-              "roles": ["leader", "follower"] if leader_follow else ["cooperator"] * args.num_robots,
-              "role_controllers": (["locomotion_velocity", "hold" if args.follower_hold else "local_FT_admittance"]
+              "roles": ["leader"] + ["follower"] * (args.num_robots - 1) if leader_follow else ["cooperator"] * args.num_robots,
+              "role_controllers": (["locomotion_velocity"] + ["hold" if args.follower_hold else "local_FT_admittance"] * (args.num_robots - 1)
                                    if leader_follow else [args.controller] * args.num_robots),
               "follower_hold": args.follower_hold,
               "stop_hold_seconds": args.stop_hold_seconds if leader_follow else None,
               "robot_displacement_world_m": (np.array([data.xpos[r.base] for r in demo.robots]) - initial_bases).tolist(),
               "base_separation_range_m": separation_range,
+              "follower_distance_to_leader_range_m": follower_distance_range.tolist() if leader_follow else None,
               "max_abs_input_wrench_world": peak_wrench.tolist(),
               "max_abs_attachment_wrench_world": peak_wrench.tolist() if args.wrench_source == "grasp" else None,
               "max_abs_payload_balance_generalized": peak_balance.tolist() if leader_follow or audit is not None else None,

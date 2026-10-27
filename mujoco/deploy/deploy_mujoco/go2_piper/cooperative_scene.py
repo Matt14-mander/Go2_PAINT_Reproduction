@@ -1,6 +1,6 @@
-"""Compile 2--4 independently named GO2-PIPER robots and one shared rigid box.
+"""Compile 2--4 independently named GO2-PIPER robots and a shared free payload.
 
-Layouts: side by side, or two robots in tandem with a rear leader ball hitch.
+Layouts: side by side, two in tandem, or a leader and followers around furniture.
 No world weld, mocap, base teleport, or kinematic payload is used. Attachments
 are aligned after nominal-arm FK.
 """
@@ -15,9 +15,14 @@ import numpy as np
 from paint_loco import JOINT_NAMES, MUJOCO_ROOT, named_id
 
 
-def build_scene(count=2, spacing=1.2, mass=.5, timestep=.005, layout="side-by-side", defaults=None):
-    if layout not in ("side-by-side", "leader-follow"):
+def build_scene(count=2, spacing=1.2, mass=.5, timestep=.005, layout="side-by-side", defaults=None, payload_kind=None):
+    if layout not in ("side-by-side", "leader-follow", "furniture"):
         raise ValueError("Unknown robot layout")
+    payload_kind = payload_kind or ("sofa" if layout == "furniture" else "tow-bar" if layout == "leader-follow" else "box")
+    if ((layout == "furniture" and (payload_kind not in ("sofa", "table") or defaults is None))
+            or (layout == "leader-follow" and payload_kind != "tow-bar")
+            or (layout == "side-by-side" and payload_kind != "box")):
+        raise ValueError("Furniture layout requires sofa/table and nominal joints; other layouts require their original payload")
     if layout == "leader-follow" and (count != 2 or defaults is None):
         raise ValueError("Leader-follow requires two robots and nominal joint positions")
     if not 2 <= count <= 4 or spacing < .9 or not .001 <= mass <= 10:
@@ -86,6 +91,9 @@ def build_scene(count=2, spacing=1.2, mass=.5, timestep=.005, layout="side-by-si
             ET.SubElement(payload, "geom", type="box", pos=f"{-.265} {y + dx} .05", size=".0325 .0125 .0125", rgba=".12 .12 .12 1")
         ET.SubElement(payload, "geom", type="box", pos=f"-.29 {y} .06", size=".0125 .0775 .0125", rgba=".12 .12 .12 1")
     assets = {p.name: p.read_bytes() for p in (MUJOCO_ROOT / "robots/go2_piper/assets").iterdir() if p.is_file()}
+    if layout == "furniture":
+        from furniture_payload import build_furniture
+        return build_furniture(root, assets, count, spacing, mass, defaults, payload_kind)
     if layout == "leader-follow":
         return _leader_follow_scene(root, assets, spacing, mass, defaults)
     return ET.tostring(root, encoding="unicode"), assets, offsets
@@ -152,7 +160,7 @@ def initialize_scene(model, data, defaults, offsets, layout="side-by-side"):
         base = named_id(model, mujoco.mjtObj.mjOBJ_BODY, prefix + "base_link")
         free = model.body_jntadr[base]
         address = model.jnt_qposadr[free]
-        xy = [y, 0] if layout == "leader-follow" else [0, y]
+        xy = y if layout == "furniture" else [y, 0] if layout == "leader-follow" else [0, y]
         data.qpos[address:address + 7] = [*xy, .35, 1, 0, 0, 0]
         joints = [named_id(model, mujoco.mjtObj.mjOBJ_JOINT, prefix + n) for n in JOINT_NAMES]
         data.qpos[model.jnt_qposadr[joints]] = defaults

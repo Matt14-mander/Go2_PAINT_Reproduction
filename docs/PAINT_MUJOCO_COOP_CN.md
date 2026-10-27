@@ -2,6 +2,8 @@
 
 目标：先跑通多机物理连接、独立控制、策略加载、录像和诊断；之后更换策略文件即可复用。首版使用两台**同向并排**的 GO2-PIPER，机械臂连接同一个自由刚体箱子，支持 `--num-robots 2/3/4`。不是两台相向站立的机器人。
 
+另支持两台**同向前后排列**的 `--drive leader-follow`：前车运行速度驱动locomotion，通过后部连接杆牵引后车；后车用自身抓取反力生成跟随指令。运行方法见下方服务器运行首节。
+
 场景通过现有 MJCF 和网格在内存中组合，机器人名称分别为 `r0/…`、`r1/…`，每台有独立根部自由关节、18个关节电机、低层上一动作、机械臂8帧历史。箱子只有一个自由关节，各机器人 EE 与箱体分别通过 [MuJoCo weld equality](https://mujoco.readthedocs.io/en/3.2.7/XMLreference.html#equality-weld) 连接。初始 FK 对齐抓取锚点后才启用约束，没有与世界固定的连接、mocap驱动、运行时瞬移或载荷重力补偿。
 
 ## 控制链和可替换策略
@@ -40,6 +42,74 @@ Teacher 观测为机械臂8帧干净历史（相对角度6、速度6、上一控
 `grasp` 从每个 weld 对自由箱体的广义约束力中，利用箱体在 EE 原点的空间 Jacobian 反解世界坐标六维 wrench，取反得到 payload→EE 的反作用力，再投影到 base 轴。此信号含重力、惯性和机器人间相互作用，力矩参考点为 EE。它**不等同于训练时施加在独立箱体上的伙伴外力/力矩**，不能假定现有 Teacher 无需适配就能使用。反解接口参考 [MuJoCo Jacobian API](https://mujoco.readthedocs.io/en/3.2.7/APIreference/APIfunctions.html#mj-jac)。
 
 ## 服务器运行
+
+### Leader–follower：前车行走，后车通过机械连接跟随
+
+新增 `--drive leader-follow`。此模式固定两台同向前后排列的 GO2-PIPER：`r0` 为前方 leader，`r1` 为后方 follower。两台均有独立自由根关节，运行独立状态的 247→12 低层 locomotion 策略；可以共享权重，也可以按 leader、follower 顺序提供两份低层权重。
+
+```text
+前进方向 +X →
+[follower]—前伸机械臂—有质量/惯量的连接杆—后部球铰—[leader]
+
+键盘/预设世界速度 → leader LL → 腿部PD/地面接触
+                                   ↓ 真实反作用力
+                              后部连接点与连接杆
+                                   ↓
+follower自己的抓取反力 → 偏置扣除/滤波/导纳 → follower LL
+```
+
+leader 机械臂保持原默认姿态；牵引连接点位于机身后部，使用三行 `connect` 约束允许相对转动。follower 机械臂末端通过六行 weld 抓住连接杆，保持默认姿态。杆端点由默认姿态的真实 FK 构建并对齐，初始约束残差接近零。杆有自由关节、碰撞和指定总质量，默认0.5 kg；不是无质量连线或受控轨迹。默认前后机身间距1.2 m，可用 `--spacing` 调整，程序检查杆端点至少有0.2 m前后净距。
+
+此模式不向任何机器人或连接杆施加引导外力，不使用 mocap 或运行时位置重置。牵引来自 leader 的腿部力矩与地面接触。只排除杆与安装连接体、follower已闭合抓取指节的碰撞；保留其余机间/杆/地面碰撞。默认依旧关闭每台自身自碰撞。
+
+控制角色不同：leader 仅使用自己的状态、给定速度和自身航向反馈；follower 仅使用自己的抓取反力和本机姿态，不读取 leader 指令、位置、速度，不叠加全局队形修正。诊断和相机可读取全局状态，但不将其反馈给 follower。第一版是 **FT 参考导纳基线**；不加载 Teacher，也不代表已经实现无FT Student。
+
+在服务器桌面已有 `limx` 环境中运行：
+
+```bash
+conda activate limx
+cd ~/workspace/Go2_PAINT_Reproduction
+DEMO=mujoco/deploy/deploy_mujoco/go2_piper/paint_cooperate.py
+LL="$PWD/logs/rsl_rl/go2_piper_paint_loco/2026-10-24_18-05-41_train_flat_20261024_180532_13553c07/exported/policy.pt"
+
+# 先核对真实低层权重维度、场景、初始连接，不推进仿真
+python "$DEMO" --ll-policy "$LL" --drive leader-follow --headless --check-only
+
+# 两机静态承载：先检查真实低层策略能否在该连接下站稳
+python "$DEMO" --ll-policy "$LL" --drive leader-follow \
+  --command-world 0 0 0 --settle-seconds 3 --ramp-seconds 3 \
+  --duration 15 --headless --report logs/mujoco_coop/leader_follow_stand.json
+
+# 桌面演示：leader 0.1 m/s，follower 从自身受力生成速度
+python "$DEMO" --ll-policy "$LL" --drive leader-follow \
+  --command-world 0.1 0 0 --max-speed 0.2 --max-yaw-rate 0.3 \
+  --settle-seconds 3 --ramp-seconds 3 --stop-hold-seconds 3 \
+  --duration 40 --keyboard --audit-grasp \
+  --report logs/mujoco_coop/leader_follow_forward.json
+```
+
+若实际 LL 导出文件在其他位置，修改 `LL` 指向已验证的247→12 TorchScript；仓库内早期18动作权重不可替代。需同步修改后的 `paint_cooperate.py`、`cooperative_scene.py`、`cooperative_control.py`、`cooperative_visuals.py`；同时保留现有 `paint_loco.py/yaml`、`grasp_audit.py`、`transport_contract.py` 和机器人网格。
+
+前3秒站立，最后1秒标定 follower 静态载荷偏置；随后3秒平滑加速。示例在34–37秒撤除 leader 速度请求，37–40秒保持请求为零，观察实际停车。follower始终响应自身反力，停车尾段不会强制将其指令归零来掩盖残余拉力。两机实际能否停车仍需看CSV。总时长至少覆盖 `settle + 2*ramp + stop-hold`。不指定参数时默认 leader 0.1 m/s、`controller=admittance`、`wrench-source=grasp`；显式传入非零 `--force-world`、`external-share`、Teacher或非两机组合会拒绝启动。
+
+键盘 W/S、A/D、Q/E **只修改 leader 世界坐标速度**，X请求leader平滑停车，R恢复初始请求，P暂停/继续。末尾停车时段仍生效。首次建议仅用W/S/X验证直行和停车；侧移、转弯需后续逐级测试。默认110°相机便于看到前后关系，可用鼠标或 `--camera-azimuth` 调整。画面显示 LEADER/FOLLOWER FT 角色、各自机体系vx指令，以及 follower **实际抓取反力**箭头，箭头不代表额外施加的力。
+
+无需键盘的距离实验，可以去掉 `--keyboard` 并添加 `--travel-distance 3`，适当延长 `--duration`；此模式距离目标对应 **leader base**，不直接指定 follower 的位置。`goal_reference=leader_base`、`goal_reached` 只反映 leader 目标，不能单独证明后车成功跟随。
+
+主动跟随对照：用完全相同参数去掉 `--keyboard`，分别运行正常版本和增加 `--follower-hold` 的版本，使用不同 `--report` 路径。hold仅把 follower 的底盘速度指令固定为零，低层策略和机械臂PD仍工作，并非关闭电机。对比 follower实际位移/速度、连接力和两机腿部力矩饱和比例，判断主动迈步是否缓解牵引负载。
+
+新增JSON字段包括 `roles`、`layout`、各机世界位移、机身水平间距范围、各连接处世界反力绝对峰值、载荷动力学平衡残差、腿/臂分开的力矩限幅需求峰值与饱和控制步比例。CSV逐机记录角色、机身世界位置、间距、腿/臂力矩需求与限幅值之比，保留原有原始/限幅速度、实际速度、反力和连接误差。大于1的力矩比值表示PD请求超过执行器限幅，实际输出仍受到限幅。指标按50Hz控制步采样，不代表物理子步峰值。`--audit-grasp` 的归一化真值对比在本模式中的外力真值为零，不能把与其差异当作跟随失败；重点检查反力方向、平衡残差和实际运动。
+
+建议验收顺序：真实权重静态承载 → 0.1 m/s短距离 → 0.15–0.2 m/s持续行走 → 停车 → 小幅转弯。连接失败、跌倒或求解器警告仍会停止并输出报告，不自动重置。导纳需要一定持续牵引力维持速度，不能假定零拉力或精确间距；真实两机闭链稳定性需要用已训练权重在服务器实测。
+
+本地自动检查：
+
+```bash
+python scripts/paint/check_mujoco_cooperate.py
+python scripts/paint/check_mujoco_leader_follow.py
+```
+
+新增检查覆盖初始几何/约束、静态承载、leader测试扰动经连接传递、断开连接后信号隔离、反力提取与动力学平衡、独立控制状态、导纳限幅恢复、停车请求尾段、真实CLI和hold对照。CLI使用明确标注的零动作fixture，仅检查接口/物理/日志，**不证明已训练策略能稳定行走**。本地未取得已训练247→12低层权重，尚未完成真实权重下的行走、长距离与转弯验收。
 
 ### PAINT 方向的桌面演示：向载荷施力，机器人跟随（推荐）
 

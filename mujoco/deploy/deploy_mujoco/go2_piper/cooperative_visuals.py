@@ -39,3 +39,17 @@ def draw_guidance(scene, payload_position, world_wrench, distance, mode):
         label.pos[:] = origin + [0, 0, .35]
         label.label = (f"{mode} | F=({force[0]:.0f},{force[1]:.0f})N "
                        f"Tz={torque:.1f}Nm | {distance:.1f}m")
+
+
+def draw_leader_follow(scene, positions, commands, follower_wrench, distance, hold=False):
+    """Show measured follower reaction, never an artificial guidance force."""
+    draw_guidance(scene, np.asarray(positions[1]) + [0, 0, .35], follower_wrench, distance, "Follower FT")
+    for index, name in enumerate(("LEADER", "FOLLOWER HOLD" if hold else "FOLLOWER FT")):
+        if scene.ngeom >= scene.maxgeom:
+            break
+        geom = scene.geoms[scene.ngeom]
+        color = [1, .65, .1, 1] if index == 0 else [.2, .8, 1, 1]
+        mujoco.mjv_initGeom(geom, mujoco.mjtGeom.mjGEOM_LABEL, np.zeros(3),
+                           np.asarray(positions[index]) + [0, 0, .6], np.eye(3).ravel(), np.asarray(color, np.float32))
+        geom.label = f"{name} vx={commands[index][0]:.2f}"
+        scene.ngeom += 1

@@ -38,6 +38,18 @@ def slew_command(current, target, dt, acceleration=.15, yaw_acceleration=.4):
     return result
 
 
+def leader_action(world_command, base_rotation, heading_target):
+    """Leader-only command conversion and own-heading feedback; no formation input.
+
+    This output must never be used as the follower's velocity request.
+    """
+    rotation = np.asarray(base_rotation)
+    velocity = rotation.T @ np.r_[np.asarray(world_command)[:2], 0.]
+    yaw = np.arctan2(rotation[1, 0], rotation[0, 0])
+    error = np.arctan2(np.sin(heading_target - yaw), np.cos(heading_target - yaw))
+    return np.r_[velocity[:2], world_command[2] + .5 * error, np.zeros(6)]
+
+
 class DesktopCommand:
     """MuJoCo key_callback writes commands; physics thread reads snapshots."""
     def __init__(self, command, max_speed, max_yaw, linear_step=.05, yaw_step=.1, label="world command"):
@@ -80,8 +92,9 @@ class WrenchFollower:
     Calibrate stationary load bias before external guidance, low-pass the wrench,
     then produce a speed request. No common velocity or formation state is read.
     """
-    def __init__(self, gain=1., time_constant=.25):
+    def __init__(self, gain=1., time_constant=.25, command_limits=None):
         self.gain, self.time_constant = gain, time_constant
+        self.command_limits = None if command_limits is None else np.asarray(command_limits, float)
         self.bias = np.zeros(6)
         self.bias_samples = 0
         self.filtered = np.zeros(3)
@@ -102,5 +115,8 @@ class WrenchFollower:
         normalized = np.array([force[0] / 40., force[1] / 40., torque[2] / 10.])
         alpha = 1 - np.exp(-dt / self.time_constant)
         self.filtered += alpha * (normalized - self.filtered)
-        self.command = slew_command(self.command, self.filtered * self.gain, dt)
+        target = self.filtered * self.gain
+        if self.command_limits is not None:
+            target = np.clip(target, -self.command_limits, self.command_limits)
+        self.command = slew_command(self.command, target, dt)
         return self.command.copy()

@@ -1,7 +1,8 @@
 """Compile 2--4 independently named GO2-PIPER robots and one shared rigid box.
 
-The robots stand side by side facing +X. No world weld, mocap, base teleport,
-or kinematic payload is used. Grasp welds are aligned after nominal-arm FK.
+Layouts: side by side, or two robots in tandem with a rear leader ball hitch.
+No world weld, mocap, base teleport, or kinematic payload is used. Attachments
+are aligned after nominal-arm FK.
 """
 
 from copy import deepcopy
@@ -14,7 +15,11 @@ import numpy as np
 from paint_loco import JOINT_NAMES, MUJOCO_ROOT, named_id
 
 
-def build_scene(count=2, spacing=1.2, mass=.5, timestep=.005):
+def build_scene(count=2, spacing=1.2, mass=.5, timestep=.005, layout="side-by-side", defaults=None):
+    if layout not in ("side-by-side", "leader-follow"):
+        raise ValueError("Unknown robot layout")
+    if layout == "leader-follow" and (count != 2 or defaults is None):
+        raise ValueError("Leader-follow requires two robots and nominal joint positions")
     if not 2 <= count <= 4 or spacing < .9 or not .001 <= mass <= 10:
         raise ValueError("Expected 2--4 robots, spacing >= .9 m, payload mass .001--10 kg")
     source = ET.parse(MUJOCO_ROOT / "robots/go2_piper/go2piper.xml").getroot()
@@ -81,31 +86,91 @@ def build_scene(count=2, spacing=1.2, mass=.5, timestep=.005):
             ET.SubElement(payload, "geom", type="box", pos=f"{-.265} {y + dx} .05", size=".0325 .0125 .0125", rgba=".12 .12 .12 1")
         ET.SubElement(payload, "geom", type="box", pos=f"-.29 {y} .06", size=".0125 .0775 .0125", rgba=".12 .12 .12 1")
     assets = {p.name: p.read_bytes() for p in (MUJOCO_ROOT / "robots/go2_piper/assets").iterdir() if p.is_file()}
+    if layout == "leader-follow":
+        return _leader_follow_scene(root, assets, spacing, mass, defaults)
     return ET.tostring(root, encoding="unicode"), assets, offsets
 
 
-def initialize_scene(model, data, defaults, offsets):
-    """Align the real free payload and both sides of each weld before activation."""
+def _leader_follow_scene(root, assets, spacing, mass, defaults):
+    """Rear ball hitch on r0, finite-mass tow bar, r1's normal forward grasp.
+
+    Build the bar from actual nominal FK, so neither endpoint is teleported
+    after activation. Only the mounting pair and closed fingers are excluded
+    from bar collision; the rest of both robots remain physical obstacles.
+    """
+    world, equality, contacts = (root.find(tag) for tag in ("worldbody", "equality", "contact"))
+    root.set("model", "paint_leader_follow")
+    world.remove(world.find("body[@name='payload']"))
+    equality.clear()
+    for pair in list(contacts):
+        if pair.get("body1", "").startswith("r0/") and pair.get("body2") == "payload":
+            contacts.remove(pair)
+    offsets = np.array([spacing / 2, -spacing / 2])  # r0 leader ahead, r1 follower behind
+    for index, x in enumerate(offsets):
+        world.find(f"body[@name='r{index}/base_link']").set("pos", f"{x} 0 .35")
+    leader = world.find("body[@name='r0/base_link']")
+    mount = ET.SubElement(leader, "body", name="r0/tow_mount", pos="-.32 0 .12")
+    ET.SubElement(mount, "geom", type="capsule", fromto=".15 0 -.1 0 0 0", size=".015",
+                  mass=".05", rgba=".9 .55 .1 1")
+    ET.SubElement(mount, "site", name="r0/tow_site", size=".025", rgba="1 .5 .1 1")
+    # FK in a temporary model with no payload/constraints. This is construction,
+    # not a running simulation reset or a kinematic force source.
+    probe_root = deepcopy(root)
+    probe_root.find("contact").clear()  # payload pair references become valid below
+    probe = mujoco.MjModel.from_xml_string(ET.tostring(probe_root, encoding="unicode"), assets)
+    state = mujoco.MjData(probe)
+    for index in range(2):
+        joints = [named_id(probe, mujoco.mjtObj.mjOBJ_JOINT, f"r{index}/{n}") for n in JOINT_NAMES]
+        state.qpos[probe.jnt_qposadr[joints]] = defaults
+    mujoco.mj_forward(probe, state)
+    front = state.xpos[named_id(probe, mujoco.mjtObj.mjOBJ_BODY, "r0/tow_mount")].copy()
+    rear = state.xpos[named_id(probe, mujoco.mjtObj.mjOBJ_BODY, "r1/end_effector")].copy()
+    if front[0] - rear[0] < .2:
+        raise ValueError("Tow bar needs at least .2m clearance; increase --spacing")
+    center = (front + rear) / 2
+    vec = lambda value: " ".join(f"{v:.12g}" for v in value)
+    payload = ET.SubElement(world, "body", name="payload", pos=vec(center))
+    ET.SubElement(payload, "freejoint", name="payload/free")
+    ET.SubElement(payload, "geom", name="payload/tow_bar", type="capsule", size=".018",
+                  fromto=vec(np.r_[rear - center, front - center]), mass=str(mass), rgba=".2 .65 .9 1")
+    for index, point in enumerate((front, rear)):
+        ET.SubElement(payload, "site", name=f"payload/handle_{index}", pos=vec(point - center),
+                      size=".02", rgba="1 .3 .1 1")
+    ET.SubElement(equality, "connect", name="grasp_0", body1="r0/tow_mount", body2="payload",
+                  anchor="0 0 0", active="false", solref=".01 1", solimp=".99 .999 .001")
+    ET.SubElement(equality, "weld", name="grasp_1", body1="r1/end_effector", body2="payload",
+                  active="false", solref=".01 1", solimp=".99 .999 .001", torquescale="1")
+    ET.SubElement(contacts, "exclude", body1="r0/tow_mount", body2="payload")
+    return ET.tostring(root, encoding="unicode"), assets, offsets
+
+
+def initialize_scene(model, data, defaults, offsets, layout="side-by-side"):
+    """Align the free payload and attachment constraints before activation."""
     ee_ids = []
     for index, y in enumerate(offsets):
         prefix = f"r{index}/"
         base = named_id(model, mujoco.mjtObj.mjOBJ_BODY, prefix + "base_link")
         free = model.body_jntadr[base]
         address = model.jnt_qposadr[free]
-        data.qpos[address:address + 7] = [0, y, .35, 1, 0, 0, 0]
+        xy = [y, 0] if layout == "leader-follow" else [0, y]
+        data.qpos[address:address + 7] = [*xy, .35, 1, 0, 0, 0]
         joints = [named_id(model, mujoco.mjtObj.mjOBJ_JOINT, prefix + n) for n in JOINT_NAMES]
         data.qpos[model.jnt_qposadr[joints]] = defaults
         ee_ids.append(named_id(model, mujoco.mjtObj.mjOBJ_BODY, prefix + "end_effector"))
     mujoco.mj_forward(model, data)
     payload = named_id(model, mujoco.mjtObj.mjOBJ_BODY, "payload")
     address = model.jnt_qposadr[model.body_jntadr[payload]]
-    center = data.xpos[ee_ids].mean(0) + [.29, 0, -.06]
-    data.qpos[address:address + 7] = [*center, 1, 0, 0, 0]
+    if layout == "side-by-side":
+        center = data.xpos[ee_ids].mean(0) + [.29, 0, -.06]
+        data.qpos[address:address + 7] = [*center, 1, 0, 0, 0]
     data.qvel[:] = 0
     mujoco.mj_forward(model, data)
     # Body weld relpose is body2 pose in body1 axes (anchor defaults to body2 origin).
     for index, ee in enumerate(ee_ids):
         eq = named_id(model, mujoco.mjtObj.mjOBJ_EQUALITY, f"grasp_{index}")
+        if model.eq_type[eq] == mujoco.mjtEq.mjEQ_CONNECT:
+            data.eq_active[eq] = True
+            continue  # ball hitch anchors were aligned in the constructed XML
         inverse = np.empty(4)
         relative = np.empty(4)
         mujoco.mju_negQuat(inverse, data.xquat[ee])

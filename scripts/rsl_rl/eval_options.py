@@ -35,6 +35,8 @@ def configure_evaluation(cfg, args):
         if any(abs(value) > limit for value, limit in zip(command, (1.0, 1.0, 1.5))):
             raise ValueError("Command exceeds the trained envelope: vx/vy +/-1, wz +/-1.5")
         velocity = cfg.commands.base_velocity
+        if hasattr(velocity, "fixed_command"):
+            velocity.fixed_command = tuple(command)
         velocity.heading_command = False
         velocity.rel_standing_envs = 0.0
         velocity.curriculum_enabled = False

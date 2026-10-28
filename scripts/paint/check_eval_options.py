@@ -39,6 +39,13 @@ def arguments(**kwargs):
 
 
 class EvaluationTests(unittest.TestCase):
+    def test_low_speed_fixed_command_bypasses_mixture(self):
+        cfg = configuration()
+        cfg.commands.base_velocity.fixed_command = None
+        module.configure_evaluation(cfg, arguments(task="GO2-PIPER-PAINT-Loco-Flat-LowSpeed",
+                                                  base_command=[0., 0., -.05]))
+        self.assertEqual(cfg.commands.base_velocity.fixed_command, (0., 0., -.05))
+
     def test_transport_nominal_preserves_teacher_schema_and_interaction(self):
         cfg = configuration()
         cfg.wrench_scale, cfg.periodic_disturbance = .2, True

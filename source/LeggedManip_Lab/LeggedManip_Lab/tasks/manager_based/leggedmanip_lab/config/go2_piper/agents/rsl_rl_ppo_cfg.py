@@ -109,6 +109,19 @@ class Go2PiperPaintLocoPPORunnerCfg(Go2PiperFlatPPORunnerCfg):
 
 
 @configclass
+class Go2PiperLowSpeedPPORunnerCfg(Go2PiperPaintLocoPPORunnerCfg):
+    experiment_name = "go2_piper_paint_loco_low_speed"
+    max_iterations = 3000
+    save_interval = 100
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=1.0, use_clipped_value_loss=True, clip_param=.1,
+        entropy_coef=.001, num_learning_epochs=3, num_mini_batches=4,
+        learning_rate=5e-5, schedule="fixed", gamma=.99, lam=.95,
+        desired_kl=.005, max_grad_norm=.5,
+    )
+
+
+@configclass
 class Go2PiperPaintLocoRoughPPORunnerCfg(Go2PiperPaintLocoPPORunnerCfg):
     experiment_name = "go2_piper_paint_loco_rough"
 

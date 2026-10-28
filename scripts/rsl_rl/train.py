@@ -41,6 +41,9 @@ parser.add_argument(
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
 parser.add_argument("--warm-start", type=str, help="Stage2 only: initialize from Stage1 checkpoint with fresh optimizer and arm head")
+parser.add_argument("--loco-warm-start", type=str, help="LowSpeed only: initialize from Flat/LowSpeed weights with a fresh optimizer")
+parser.add_argument("--loco-baseline-policy", type=str, help="Original exported Flat policy.pt for periodic CPU MuJoCo regression")
+parser.add_argument("--loco-eval-interval", type=int, default=500, help="LowSpeed checkpoint regression interval; 0 disables")
 parser.add_argument(
     "--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes."
 )
@@ -144,6 +147,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     stage2 = args_cli.task == "GO2-PIPER-PAINT-Transport-Flat-Stage2"
+    low_speed = args_cli.task in ("GO2-PIPER-PAINT-Loco-Flat-LowSpeed", "GO2-PIPER-PAINT-Loco-Flat-LowSpeed-Restore")
+    if args_cli.loco_warm_start or args_cli.loco_baseline_policy or low_speed:
+        if not low_speed or args_cli.warm_start or args_cli.distributed:
+            raise ValueError("Low-speed transfer/regression requires a LowSpeed task and a single process")
+        if not version.parse("3.0.1") <= version.parse(installed_version) < version.parse("4.0.0"):
+            raise RuntimeError("LowSpeed transfer is verified with the isolated RSL-RL 3.0.1 runtime")
+        if bool(args_cli.loco_warm_start) == bool(agent_cfg.resume):
+            raise ValueError("LowSpeed requires exactly one of --loco-warm-start or --resume")
+        if args_cli.loco_eval_interval < 0:
+            raise ValueError("--loco-eval-interval must be >= 0")
+        if args_cli.loco_eval_interval and not args_cli.loco_baseline_policy:
+            raise ValueError("Periodic regression requires --loco-baseline-policy ORIGINAL_EXPORTED_POLICY")
+        for path in (args_cli.loco_warm_start, args_cli.loco_baseline_policy):
+            if path and not Path(path).expanduser().is_file():
+                raise FileNotFoundError(path)
     if args_cli.warm_start:
         if not stage2 or agent_cfg.resume or args_cli.distributed:
             raise ValueError("--warm-start requires Stage2, no --resume, and a single training process")
@@ -245,12 +263,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         (Path(log_dir) / "warm_start.json").write_text(json.dumps(transfer, indent=2), encoding="utf-8")
         print(f"[STAGE2] Warm start: {json.dumps(transfer)}", flush=True)
 
+    if args_cli.loco_warm_start:
+        from low_speed_warm_start import warm_start_low_speed
+        transfer = warm_start_low_speed(runner, args_cli.loco_warm_start)
+        Path(log_dir).mkdir(parents=True, exist_ok=True)
+        (Path(log_dir) / "warm_start.json").write_text(json.dumps(transfer, indent=2), encoding="utf-8")
+        print(f"[LOWSPEED] Warm start: {json.dumps(transfer)}", flush=True)
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
 
+    if low_speed and args_cli.loco_eval_interval:
+        from low_speed_regression import install_regression_hook
+        install_regression_hook(runner, log_dir, args_cli.loco_baseline_policy, args_cli.loco_eval_interval)
+
     # run training
-    runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=not stage2)
+    runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=not (stage2 or low_speed))
+
+    if low_speed and args_cli.loco_eval_interval:
+        runner.low_speed_regression_final()
 
     print(f"Training time: {round(time.time() - start_time, 2)} seconds")
 
@@ -259,7 +290,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
 
 if __name__ == "__main__":
-    # run the main function
-    main()
-    # close sim app
-    simulation_app.close()
+    try:
+        main()
+    finally:
+        simulation_app.close()

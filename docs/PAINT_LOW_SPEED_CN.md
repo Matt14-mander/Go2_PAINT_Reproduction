@@ -31,7 +31,7 @@ cd ~/workspace/Go2_PAINT_Reproduction
 GPU=1 bash scripts/paint/train_loco_low_speed.sh smoke
 ```
 
-GPU 指的是 `nvidia-smi` 中的物理编号；脚本通过 `CUDA_VISIBLE_DEVICES` 映射，在进程内部使用 `cuda:0`。请选择当时空闲的卡。渲染多 GPU 已关闭。
+GPU 为设备编号；脚本取消 `CUDA_VISIBLE_DEVICES` 屏蔽，设置 PCI_BUS_ID 排序，通过 `--device cuda:N`、`agent.device=cuda:N` 和渲染 activeGpu 显式选卡。请选择当时空闲的卡，并核对启动日志与 nvidia-smi 的 PCI bus ID。渲染多 GPU 已关闭。纯训练子进程会清除 DISPLAY/WAYLAND_DISPLAY，关闭直播和摄像头，避免继承 ThinLinc 虚拟显示；不影响终端或桌面会话。
 
 smoke 先运行 16 环境/650 步 Isaac 检查，覆盖 12 秒重采样、单环境 reset 隔离和序列执行，再运行 32 环境/2 次真实 PPO 更新、权重迁移、Isaac 原生 JIT 导出以及 CPU MuJoCo 回归。会创建独立 `_smoke` 实验；不会用 smoke 的输出继续正式训练。旧策略低速不达标并不是 smoke 失败；发生非有限值、接口不匹配、导出失败或已有能力退化则失败。最终应出现 `SMOKE PASSED`。
 

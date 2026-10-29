@@ -7,6 +7,30 @@ from pathlib import Path
 import numpy as np
 
 
+def validate_student_contract(policy_paths, ll_paths, controller, wrench_source):
+    """Oracle prototype must not silently consume estimated/local grasp intent."""
+    for policy in policy_paths:
+        path = Path(policy).expanduser()
+        manifest = path.parent / "manifest.json"
+        metadata = json.loads(manifest.read_text()) if manifest.is_file() else {}
+        student = metadata.get("policy_kind") == "paint_student_oracle_v1"
+        if controller != "student-oracle":
+            if student:
+                raise ValueError("Oracle student requires --controller student-oracle")
+            continue
+        if not student or metadata.get("intent_source") != "oracle":
+            raise ValueError("student-oracle requires the student export and its manifest")
+        if metadata.get("task") != "GO2-PIPER-PAINT-Transport-Flat-Stage2":
+            raise ValueError("Oracle prototype requires the Stage2 execution contract")
+        if wrench_source != "external-share":
+            raise ValueError("Oracle prototype requires --wrench-source external-share; grasp is NOT oracle intent")
+        if metadata.get("policy_sha256") != hashlib.sha256(path.read_bytes()).hexdigest():
+            raise ValueError("Student policy hash mismatch")
+        for ll in ll_paths:
+            if metadata.get("ll_policy_sha256") != hashlib.sha256(Path(ll).expanduser().read_bytes()).hexdigest():
+                raise ValueError("Student requires the same frozen LL used for distillation")
+
+
 def load_stage2_contract(policy_paths):
     contracts = []
     for policy in policy_paths:

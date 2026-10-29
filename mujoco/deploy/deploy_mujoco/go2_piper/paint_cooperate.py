@@ -27,7 +27,7 @@ from cooperative_scene import build_scene, initialize_scene
 from cooperative_control import DesktopCommand, WrenchFollower, leader_action, motion_profile, slew_command, velocity_target
 from cooperative_visuals import draw_guidance, draw_leader_follow
 from grasp_audit import GraspAudit, normalized_input, payload_balance
-from transport_contract import load_stage2_contract, arm_target, force_profile
+from transport_contract import load_stage2_contract, arm_target, force_profile, validate_student_contract
 from physics_audit import PROFILES, apply_profile, describe_model
 from paint_loco import JOINT_NAMES, MUJOCO_ROOT, PaintBridge, named_id
 
@@ -232,7 +232,7 @@ def main():
     parser.add_argument("--physics-profile", choices=PROFILES, default="legacy")
     parser.add_argument("--ll-policy", type=Path, nargs="+", required=True)
     parser.add_argument("--hl-policy", type=Path, nargs="+", default=[])
-    parser.add_argument("--controller", choices=("reference", "admittance", "teacher"),
+    parser.add_argument("--controller", choices=("reference", "admittance", "teacher", "student-oracle"),
                         help="Default: admittance for leader-follow; reference otherwise")
     parser.add_argument("--admittance-gain", type=float, default=1.)
     parser.add_argument("--drive", choices=("wrench", "velocity", "leader-follow"), default="wrench")
@@ -289,12 +289,13 @@ def main():
         parser.error("Leader-follow requires 2 robots for tow-bar or 2--4 for furniture, admittance, grasp reactions, no HL policy and zero external force")
     if args.follower_hold and not leader_follow:
         parser.error("--follower-hold requires --drive leader-follow")
+    validate_student_contract(args.hl_policy, args.ll_policy, args.controller, args.wrench_source)
     contract = load_stage2_contract(args.hl_policy)
     if args.require_stage2_contract and contract is None:
         parser.error("Copy the Stage2 exported manifest.json alongside policy.pt")
     if contract is not None:
-        if args.freeze_arm or args.controller != "teacher":
-            parser.error("Stage2 manifest requires teacher mode with the arm enabled; omit --freeze-arm")
+        if args.freeze_arm or args.controller not in ("teacher", "student-oracle"):
+            parser.error("Stage2 manifest requires teacher/student-oracle with the arm enabled; omit --freeze-arm")
         if not np.allclose(contract["command_limits"], [args.max_speed, args.max_speed, args.max_yaw_rate]):
             parser.error("Command limits must match the Stage2 manifest")
         args.settle_seconds = contract["settle_seconds"]
@@ -312,10 +313,10 @@ def main():
         parser.error("All numeric parameters must be finite")
     if args.duration <= 0 or args.fps < 1 or not 0 < args.max_speed <= 1 or not 0 < args.max_yaw_rate <= 1.5 or args.formation_gain < 0:
         parser.error("Expected duration/fps > 0, speed in (0,1], yaw rate in (0,1.5], formation gain >= 0")
-    if args.controller == "teacher" and not args.hl_policy:
-        parser.error("teacher mode requires exported 147->9 --hl-policy")
-    if args.controller != "teacher" and args.hl_policy:
-        parser.error("Use --controller teacher to enable --hl-policy")
+    if args.controller in ("teacher", "student-oracle") and not args.hl_policy:
+        parser.error("Learned controller requires exported 147->9 --hl-policy")
+    if args.controller not in ("teacher", "student-oracle") and args.hl_policy:
+        parser.error("Use --controller teacher or student-oracle to enable --hl-policy")
     if args.settle_seconds < 0 or args.ramp_seconds <= 0 or args.viewer_fps < 1:
         parser.error("Expected settle >= 0, ramp > 0, viewer fps > 0")
     if leader_follow and (args.stop_hold_seconds < 0 or args.duration < args.settle_seconds + 2 * args.ramp_seconds + args.stop_hold_seconds):
@@ -630,7 +631,8 @@ def main():
               "max_arm_target_offset_rad": arm_offset_max.tolist(),
               "max_arm_target_speed_rad_s": arm_speed_max.tolist(),
               "ll_policies": [{"path": str(p.path), "sha256": p.sha256} for p in lows],
-              "hl_policies": [{"path": str(p.path), "sha256": p.sha256} for p in highs], "trace": str(trace_path)}
+              "hl_policies": [{"path": str(p.path), "sha256": p.sha256} for p in highs], "trace": str(trace_path),
+              "student_intent_source": "oracle_external_share" if args.controller == "student-oracle" else None}
     if args.travel_distance is not None:
         direction = np.asarray(args.command_world[:2]) / np.linalg.norm(args.command_world[:2])
         goal = command_origin[:2] + direction * args.travel_distance
